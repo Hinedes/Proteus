@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 # ── Config ────────────────────────────────────────────────────────────────────
 
 SEED       = 42
-EPOCHS     = 10
+EPOCHS     = 30
 BATCH_SIZE = 256
 LR         = 1e-3
 BIN_SIZE   = 160
