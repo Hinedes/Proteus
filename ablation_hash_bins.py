@@ -1,25 +1,10 @@
 """
-Potential Well Project — Hash Bin Ablation Study
-=================================================
-Question: Does averaging gradients within random hash buckets of ~160 weights
-          degrade convergence enough to disqualify the cluster-level rigid physics?
-
-Two runs back to back:
-  1. Baseline  — normal gradient descent, no interference
-  2. Hashed    — gradients averaged within hash bins before each optimizer step
-
-Same model, same seed, same data. Compare final accuracy and loss curves.
-
-Usage:
-    python ablation_hash_bins.py
-
-Outputs:
-    ablation_results.png   — loss + accuracy curves, both runs overlaid
-    ablation_results.txt   — final numbers for logging
+Potential Well Project — Hash Bin Ablation Study (vectorized)
+=============================================================
+Same experiment as before, but bin averaging is fully vectorized.
+No Python loops over individual parameters during training.
 """
 
-import random
-import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -29,13 +14,13 @@ import matplotlib.pyplot as plt
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SEED          = 42
-EPOCHS        = 10
-BATCH_SIZE    = 256
-LR            = 1e-3
-BIN_SIZE      = 160          # parameters per hash bucket
-DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DATA_DIR      = "./data"
+SEED       = 42
+EPOCHS     = 10
+BATCH_SIZE = 256
+LR         = 1e-3
+BIN_SIZE   = 160
+DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DATA_DIR   = "./data"
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -53,55 +38,40 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-# ── Hash bin construction ──────────────────────────────────────────────────────
+# ── Vectorized hash bin setup ─────────────────────────────────────────────────
 
-def build_bins(model: nn.Module, bin_size: int, seed: int):
-    """
-    Assigns every trainable scalar weight to a random bin.
-    Returns a list of lists of (param_tensor, flat_index) tuples.
-    Bins have at most bin_size elements; the last bin may be smaller.
-    """
-    rng = random.Random(seed)
-
-    # Collect all (param, flat_idx) pairs across the model
-    all_refs = []
-    for param in model.parameters():
-        if param.requires_grad:
-            for idx in range(param.numel()):
-                all_refs.append((param, idx))
-
-    rng.shuffle(all_refs)
-
-    bins = []
-    for start in range(0, len(all_refs), bin_size):
-        bins.append(all_refs[start : start + bin_size])
-
-    total = sum(len(b) for b in bins)
-    print(f"[hash-bins] {len(bins)} bins, {total} total parameters, "
-          f"avg {total / len(bins):.1f} per bin")
-    return bins
+def build_bin_index(model, bin_size, seed, device):
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    gen   = torch.Generator()
+    gen.manual_seed(seed)
+    perm    = torch.randperm(total, generator=gen)
+    bin_ids = torch.empty(total, dtype=torch.long)
+    bin_ids[perm] = torch.arange(total) // bin_size
+    n_bins = int(bin_ids.max().item()) + 1
+    print(f"[hash-bins] {n_bins} bins, {total} total parameters, "
+          f"avg {total / n_bins:.1f} per bin")
+    return bin_ids.to(device), n_bins
 
 
-def apply_hash_gradient_averaging(bins):
-    """
-    For each bin, read the current .grad values, average them,
-    and write the average back to every element in the bin.
-    Call this AFTER loss.backward() and BEFORE optimizer.step().
-    """
-    for bin_entries in bins:
-        grads = []
-        for param, idx in bin_entries:
-            if param.grad is not None:
-                grads.append(param.grad.view(-1)[idx].item())
-
-        if not grads:
-            continue
-
-        avg = sum(grads) / len(grads)
-
-        for param, idx in bin_entries:
-            if param.grad is not None:
-                param.grad.view(-1)[idx] = avg
+def apply_hash_gradient_averaging(model, bin_ids, n_bins):
+    # 1. Collect all gradients into one flat tensor
+    grads = torch.cat([
+        p.grad.view(-1)
+        for p in model.parameters()
+        if p.requires_grad and p.grad is not None
+    ])
+    # 2. Per-bin mean via scatter_reduce
+    sums = torch.zeros(n_bins, device=grads.device).scatter_reduce_(
+               0, bin_ids, grads, reduce="mean", include_self=False)
+    # 3. Broadcast bin means back to every position
+    averaged = sums[bin_ids]
+    # 4. Write back
+    offset = 0
+    for p in model.parameters():
+        if p.requires_grad and p.grad is not None:
+            n = p.numel()
+            p.grad.view(-1).copy_(averaged[offset : offset + n])
+            offset += n
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -118,9 +88,9 @@ def get_loaders():
                               num_workers=2, pin_memory=True)
     return train_loader, test_loader
 
-# ── Train / eval loops ────────────────────────────────────────────────────────
+# ── Train / eval ──────────────────────────────────────────────────────────────
 
-def train_epoch(model, loader, optimizer, criterion, bins=None):
+def train_epoch(model, loader, optimizer, criterion, bin_ids=None, n_bins=None):
     model.train()
     total_loss = 0.0
     for x, y in loader:
@@ -128,8 +98,8 @@ def train_epoch(model, loader, optimizer, criterion, bins=None):
         optimizer.zero_grad()
         loss = criterion(model(x), y)
         loss.backward()
-        if bins is not None:
-            apply_hash_gradient_averaging(bins)
+        if bin_ids is not None:
+            apply_hash_gradient_averaging(model, bin_ids, n_bins)
         optimizer.step()
         total_loss += loss.item() * x.size(0)
     return total_loss / len(loader.dataset)
@@ -149,30 +119,25 @@ def eval_epoch(model, loader, criterion):
 
 # ── Full run ──────────────────────────────────────────────────────────────────
 
-def run(use_hashing: bool, train_loader, test_loader):
+def run(use_hashing, train_loader, test_loader):
     torch.manual_seed(SEED)
     model     = MLP().to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LR)
     criterion = nn.CrossEntropyLoss()
-
-    bins = build_bins(model, BIN_SIZE, SEED) if use_hashing else None
-
+    bin_ids, n_bins = (build_bin_index(model, BIN_SIZE, SEED, DEVICE)
+                       if use_hashing else (None, None))
     train_losses, test_losses, test_accs = [], [], []
-
     for epoch in range(1, EPOCHS + 1):
-        tr_loss = train_epoch(model, train_loader, optimizer, criterion, bins)
+        tr_loss = train_epoch(model, loader=train_loader, optimizer=optimizer,
+                              criterion=criterion, bin_ids=bin_ids, n_bins=n_bins)
         te_loss, te_acc = eval_epoch(model, test_loader, criterion)
-
         train_losses.append(tr_loss)
         test_losses.append(te_loss)
         test_accs.append(te_acc)
-
         tag = "HASHED  " if use_hashing else "BASELINE"
         print(f"[{tag}] Epoch {epoch:2d}/{EPOCHS}  "
-              f"train_loss={tr_loss:.4f}  "
-              f"test_loss={te_loss:.4f}  "
+              f"train_loss={tr_loss:.4f}  test_loss={te_loss:.4f}  "
               f"test_acc={te_acc*100:.2f}%")
-
     return train_losses, test_losses, test_accs
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -180,17 +145,23 @@ def run(use_hashing: bool, train_loader, test_loader):
 def main():
     print(f"Device: {DEVICE}")
     torch.manual_seed(SEED)
-
     train_loader, test_loader = get_loaders()
 
     print("\n── BASELINE RUN ──────────────────────────────────────────────────")
     bl_tr, bl_te, bl_acc = run(False, train_loader, test_loader)
 
     print("\n── HASHED RUN ────────────────────────────────────────────────────")
-    hs_tr, hs_te, hs_acc = run(True,  train_loader, test_loader)
+    hs_tr, hs_te, hs_acc = run(True, train_loader, test_loader)
 
-    # ── Report ────────────────────────────────────────────────────────────────
-    report_lines = [
+    delta_acc = bl_acc[-1] - hs_acc[-1]
+    if delta_acc < 0.02:
+        verdict = "PASS — Hash bin noise does not meaningfully degrade convergence. Architecture proceeds."
+    elif delta_acc < 0.05:
+        verdict = "MARGINAL — Small degradation. Investigate bin size or coherence grouping."
+    else:
+        verdict = "FAIL — Hash bin noise is lethal. Bin design must be revised."
+
+    report = "\n".join([
         "=" * 60,
         "Potential Well — Hash Bin Ablation Results",
         "=" * 60,
@@ -200,49 +171,27 @@ def main():
         "",
         f"Baseline  final test acc:  {bl_acc[-1]*100:.2f}%",
         f"Hashed    final test acc:  {hs_acc[-1]*100:.2f}%",
-        f"Delta:                     {(bl_acc[-1] - hs_acc[-1])*100:+.2f}pp",
+        f"Delta:                     {delta_acc*100:+.2f}pp",
         "",
         f"Baseline  final test loss: {bl_te[-1]:.4f}",
         f"Hashed    final test loss: {hs_te[-1]:.4f}",
         "",
-        "Verdict:",
-    ]
-
-    delta_acc = bl_acc[-1] - hs_acc[-1]
-    if delta_acc < 0.02:
-        verdict = "PASS — Hash bin noise does not meaningfully degrade convergence. Architecture proceeds."
-    elif delta_acc < 0.05:
-        verdict = "MARGINAL — Small degradation observed. Investigate bin size or coherence grouping."
-    else:
-        verdict = "FAIL — Hash bin noise is lethal to convergence. Bin design must be revised."
-
-    report_lines.append(verdict)
-    report = "\n".join(report_lines)
+        "Verdict:", verdict,
+    ])
     print("\n" + report)
-
     with open("ablation_results.txt", "w") as f:
         f.write(report)
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
     epochs = list(range(1, EPOCHS + 1))
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
-    axes[0].plot(epochs, bl_te,  label="Baseline",  color="#4C9BE8")
-    axes[0].plot(epochs, hs_te,  label="Hashed",    color="#E8844C", linestyle="--")
-    axes[0].set_title("Test Loss")
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Loss")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(epochs, [a*100 for a in bl_acc], label="Baseline",  color="#4C9BE8")
-    axes[1].plot(epochs, [a*100 for a in hs_acc], label="Hashed",    color="#E8844C", linestyle="--")
-    axes[1].set_title("Test Accuracy (%)")
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Accuracy")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
+    axes[0].plot(epochs, bl_te,  label="Baseline", color="#4C9BE8")
+    axes[0].plot(epochs, hs_te,  label="Hashed",   color="#E8844C", linestyle="--")
+    axes[0].set_title("Test Loss"); axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("Loss")
+    axes[0].legend(); axes[0].grid(True, alpha=0.3)
+    axes[1].plot(epochs, [a*100 for a in bl_acc], label="Baseline", color="#4C9BE8")
+    axes[1].plot(epochs, [a*100 for a in hs_acc], label="Hashed",   color="#E8844C", linestyle="--")
+    axes[1].set_title("Test Accuracy (%)"); axes[1].set_xlabel("Epoch"); axes[1].set_ylabel("Accuracy")
+    axes[1].legend(); axes[1].grid(True, alpha=0.3)
     fig.suptitle(f"Hash Bin Ablation (bin_size={BIN_SIZE})", fontsize=13)
     plt.tight_layout()
     plt.savefig("ablation_results.png", dpi=150)
