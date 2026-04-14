@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -128,12 +127,14 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── Model
+    # Flash Attention 2: fused CUDA kernel for attention, faster + lower VRAM
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
 
     # ── Condition setup
