@@ -128,7 +128,7 @@ def main():
 
     # ── Model
     # sdpa: PyTorch built-in fused attention, no head dim restriction, Blackwell-compatible.
-    # flash_attention_2 is excluded: Gemma 4 has layers with head_dim > 256, FA2 hard limit.
+    # flash_attention_2 excluded: Gemma 4 has head_dim > 256, FA2 hard limit.
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
@@ -160,9 +160,6 @@ def main():
         model.print_trainable_parameters()
 
     # ── Triton compile (opt-in)
-    # Gradient hooks survive compilation: they fire on the gradient tensor
-    # after the backward pass, outside the compiled graph.
-    # Skip for smoke tests (--max_steps < 50) since warm-up cost outweighs benefit.
     if args.compile:
         if args.max_steps < 50:
             print("[compile] Skipped — max_steps < 50, warm-up cost not worth it.")
@@ -202,15 +199,16 @@ def main():
         max_steps=args.max_steps,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
-        gradient_checkpointing=True,        # recompute activations, saves VRAM
+        gradient_checkpointing=True,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
         warmup_steps=50,
         bf16=True,
-        optim="adamw_torch_fused",          # fused Adam: no bitsandbytes, works on Blackwell
+        optim="adamw_torch_fused",
         logging_steps=10,
         save_steps=args.max_steps,
         save_total_limit=1,
+        save_only_model=True,               # skip optimizer state: ~32GB saved to disk, not needed
         report_to="none",
         dataloader_num_workers=2,
     )
