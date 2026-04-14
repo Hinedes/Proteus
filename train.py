@@ -11,6 +11,7 @@ Usage:
   python train.py --domain medical --condition proteus
   python train.py --domain legal   --condition full   --max_steps 200
   python train.py --domain code    --condition lora
+  python train.py --domain code    --condition proteus --compile   # Triton kernels
 """
 
 import argparse
@@ -94,18 +95,6 @@ def format_prompt(row: dict) -> str:
     )
 
 
-def tokenize(batch, tokenizer):
-    texts = [format_prompt(row) for row in batch]
-    enc   = tokenizer(
-        texts,
-        truncation=True,
-        max_length=MAX_LENGTH,
-        padding=False,
-    )
-    enc["labels"] = enc["input_ids"].copy()
-    return enc
-
-
 # ─────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────
@@ -115,10 +104,13 @@ def main():
                         choices=["medical", "legal", "code", "multilingual"])
     parser.add_argument("--condition",  required=True,
                         choices=["proteus", "full", "lora"])
-    parser.add_argument("--max_steps",  type=int, default=500)
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--grad_accum", type=int, default=8)
+    parser.add_argument("--max_steps",  type=int,   default=500)
+    parser.add_argument("--batch_size", type=int,   default=2)
+    parser.add_argument("--grad_accum", type=int,   default=8)
     parser.add_argument("--lr",         type=float, default=2e-5)
+    parser.add_argument("--compile",    action="store_true",
+                        help="Compile model with torch.compile (Triton). "
+                             "Adds ~1-2 min warm-up on first run, faster thereafter.")
     args = parser.parse_args()
 
     out_dir = CKPT_DIR / args.condition / args.domain
@@ -127,6 +119,7 @@ def main():
     print(f"\n=== Proteus training ===")
     print(f"  Domain:    {args.domain}")
     print(f"  Condition: {args.condition}")
+    print(f"  Compile:   {args.compile}")
     print(f"  Output:    {out_dir}\n")
 
     # ── Tokenizer
@@ -138,7 +131,7 @@ def main():
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
     )
@@ -163,6 +156,18 @@ def main():
         )
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
+
+    # ── Triton compile (opt-in)
+    # Gradient hooks survive compilation: they fire on the gradient tensor
+    # after the backward pass, outside the compiled graph.
+    # Skip for smoke tests (--max_steps < 50) since warm-up cost outweighs benefit.
+    if args.compile:
+        if args.max_steps < 50:
+            print("[compile] Skipped — max_steps < 50, warm-up cost not worth it.")
+        else:
+            print("[compile] Compiling model with torch.compile (mode=reduce-overhead)...")
+            model = torch.compile(model, mode="reduce-overhead")
+            print("[compile] Done. First batch will trigger Triton kernel compilation.")
 
     # ── Dataset
     print(f"Loading {args.domain} dataset...")
