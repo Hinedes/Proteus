@@ -127,14 +127,15 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── Model
-    # Flash Attention 2: fused CUDA kernel for attention, faster + lower VRAM
+    # sdpa: PyTorch built-in fused attention, no head dim restriction, Blackwell-compatible.
+    # flash_attention_2 is excluded: Gemma 4 has layers with head_dim > 256, FA2 hard limit.
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
     )
 
     # ── Condition setup
