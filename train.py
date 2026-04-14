@@ -200,12 +200,14 @@ def main():
         max_steps=args.max_steps,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
+        gradient_checkpointing=True,        # recompute activations, saves VRAM
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
         warmup_steps=50,
         bf16=True,
+        optim="adamw_8bit",                 # 8-bit Adam: cuts optimizer state from ~32GB to ~8GB
         logging_steps=10,
-        save_steps=args.max_steps,      # save once at the end
+        save_steps=args.max_steps,
         save_total_limit=1,
         report_to="none",
         dataloader_num_workers=2,
