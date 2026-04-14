@@ -205,7 +205,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_steps=50,
         bf16=True,
-        optim="adamw_8bit",                 # 8-bit Adam: cuts optimizer state from ~32GB to ~8GB
+        optim="adamw_torch_fused",          # fused Adam: no bitsandbytes, works on Blackwell
         logging_steps=10,
         save_steps=args.max_steps,
         save_total_limit=1,
