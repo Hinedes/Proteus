@@ -61,6 +61,7 @@ class BlockMLP(nn.Module):
     def __init__(self, h_d=H_D, num_domains=NUM_DOMAINS, classes_per_domain=CLASSES_PER_DOMAIN):
         super().__init__()
         self.h_d = h_d
+        self.num_domains = num_domains
         self.h_total = h_d * num_domains
         self.fc1 = nn.Linear(784, self.h_total)
         self.fc2 = nn.Linear(self.h_total, self.h_total)
