@@ -136,54 +136,52 @@ def load_ewc_state(path: str):
 class EWCTrainer(Trainer):
     """Trainer that adds EWC penalty to the standard cross-entropy loss.
 
-    Optimization: pre-flattens fisher and opt_params into single tensors on
-    first step so the penalty is one vectorized op instead of a Python loop
-    over thousands of named parameters every step.
+    Memory-efficient: stores fisher/opt as per-parameter lists on GPU and
+    accumulates the penalty in a loop. Avoids the ~14.8GB torch.cat that
+    caused OOM on MI300X.
     """
 
     def __init__(self, *args, ewc_lambda=5000.0, fisher=None, opt_params=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.ewc_lambda       = ewc_lambda
-        self._fisher_dict     = fisher      # {name: tensor}, freed after first step
-        self._opt_params_dict = opt_params  # {name: tensor}, freed after first step
-        # Pre-flattened tensors built on first compute_loss call
-        self._param_names  = None   # ordered list of param names in fisher
-        self._fisher_flat  = None   # [N] tensor
-        self._opt_flat     = None   # [N] tensor
+        self._fisher_dict     = fisher      # {name: tensor}, freed after build
+        self._opt_params_dict = opt_params  # {name: tensor}, freed after build
+        self._ewc_pairs       = None        # [(param_ref, fisher_t, opt_t), ...]
+        self._built           = False
 
-    def _build_flat(self, model):
-        """Align fisher/opt to current model params and flatten. Called once."""
-        names, f_parts, o_parts = [], [], []
+    def _build_pairs(self, model):
+        """Match fisher/opt to live model params. Store references, not copies."""
+        pairs = []
         dev = next(model.parameters()).device
-        for n, p in model.named_parameters():
-            if n in self._fisher_dict:
-                names.append(n)
-                f_parts.append(self._fisher_dict[n].to(dev).reshape(-1))
-                o_parts.append(self._opt_params_dict[n].to(dev).reshape(-1))
-        self._param_names = names
-        self._fisher_flat = torch.cat(f_parts) if f_parts else None
-        self._opt_flat    = torch.cat(o_parts) if o_parts else None
-        # Free dicts -- no longer needed
+        param_dict = dict(model.named_parameters())
+        n_tracked = 0
+        for n in self._fisher_dict:
+            if n in param_dict:
+                f = self._fisher_dict[n].to(dev)
+                o = self._opt_params_dict[n].to(dev)
+                pairs.append((n, f, o))
+                n_tracked += f.numel()
+        self._ewc_pairs = pairs
+        self._built = True
+        # Free dicts
         self._fisher_dict = None
         self._opt_params_dict = None
-        print(f"[ewc] Penalty tensor built: {self._fisher_flat.numel():,} params tracked.")
+        print(f"[ewc] Penalty pairs built: {n_tracked:,} params tracked across {len(pairs)} tensors.")
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         outputs = model(**inputs)
         loss    = outputs.loss
 
-        if self._fisher_dict is not None:
-            # First step: build flattened tensors
-            self._build_flat(model)
+        if self._fisher_dict is not None and not self._built:
+            self._build_pairs(model)
 
-        if self._fisher_flat is not None:
-            # Single vectorized op: no Python loop
-            p_flat = torch.cat([
-                dict(model.named_parameters())[n].reshape(-1)
-                for n in self._param_names
-            ])
-            ewc_penalty = (self._fisher_flat * (p_flat - self._opt_flat) ** 2).sum()
-            loss = loss + (self.ewc_lambda / 2.0) * ewc_penalty
+        if self._ewc_pairs is not None:
+            param_dict = dict(model.named_parameters())
+            penalty = torch.tensor(0.0, device=loss.device)
+            for n, f, o in self._ewc_pairs:
+                p = param_dict[n]
+                penalty = penalty + (f * (p - o) ** 2).sum()
+            loss = loss + (self.ewc_lambda / 2.0) * penalty
 
         return (loss, outputs) if return_outputs else loss
 

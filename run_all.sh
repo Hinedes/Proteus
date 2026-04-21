@@ -1,13 +1,10 @@
 #!/bin/bash
 chmod +x "$0"
-# Proteus — Full Experiment Runner v2
-# - Failure detection: notifies immediately on any crash with the error
-# - Heartbeat: pings every 30 minutes with current progress
-# - Credit estimate: tracks elapsed time and estimated spend
-# - Recovery: on crash, logs exactly which command failed and how to resume
+# Proteus — 4-Domain Sequential Chain Runner
+# Runs Proteus vs Full fine-tune across medical → legal → code → multilingual.
+# Single-domain baselines (LoRA, EWC, Replay) are already complete.
 #
 # Usage:
-#   chmod +x run_all.sh
 #   ./run_all.sh YOUR_NTFY_TOPIC
 
 NTFY_TOPIC="${1:-proteus-notify}"
@@ -19,7 +16,6 @@ RATE=1.99   # USD/hr for MI300X
 
 mkdir -p results
 
-# Fail on error, and fail if any command in a pipeline fails
 set -eo pipefail
 
 # ─────────────────────────────────────────────
@@ -68,7 +64,6 @@ get_step() {
     cat "$STEP_FILE" 2>/dev/null || echo "unknown"
 }
 
-# Clean last meaningful log line (skip tqdm bars and empty lines)
 last_clean_log() {
     grep -E "^\[20|loss|perplexity|DONE|START|CRASH" "$LOG" 2>/dev/null \
         | tail -1 \
@@ -90,7 +85,7 @@ Elapsed: $(elapsed_str) | Spent: $(credit_used)
 
 Last: $tail_log
 
-Resume: ./run_all.sh $NTFY_TOPIC" \
+Resume manually from failed step." \
         "urgent" "rotating_light"
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     exit $exit_code
@@ -99,7 +94,7 @@ Resume: ./run_all.sh $NTFY_TOPIC" \
 trap 'on_error $LINENO' ERR
 
 # ─────────────────────────────────────────────
-# Heartbeat (background process, every 30 min)
+# Heartbeat (every 30 min)
 # ─────────────────────────────────────────────
 heartbeat() {
     while true; do
@@ -155,7 +150,9 @@ else:
         d = e.get("domains", {})
         med = d.get("medical", "?")
         leg = d.get("legal", "?")
-        print(f"{e['label']}: med={med} leg={leg}")
+        cod = d.get("code", "?")
+        mul = d.get("multilingual", "?")
+        print(f"{e['label']}: med={med} leg={leg} cod={cod} mul={mul}")
 EOF
 }
 
@@ -163,66 +160,20 @@ EOF
 # Start
 # ─────────────────────────────────────────────
 log "=============================="
-log "Proteus full experiment run v2"
+log "Proteus 4-domain sequential chains"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
-notify "Proteus started" \
-"Conditions queued: LoRA, EWC, Replay
-ETA ~2 hours | Budget ~\$4
+notify "Proteus 4-domain chains started" \
+"Chains: Proteus, Full
+4 domains × 500 steps × 2 conditions = 4000 steps total
 Topic: $NTFY_TOPIC" \
     "default" "rocket"
 
 # ─────────────────────────────────────────────
-# LoRA
-# ─────────────────────────────────────────────
-log "--- CONDITION: lora ---"
-run_train medical lora
-run_train legal   lora
-run_eval checkpoints/lora/legal lora_after_legal_v4
-
-notify "LoRA done" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
-    "default" "white_check_mark"
-
-# ─────────────────────────────────────────────
-# EWC
-# ─────────────────────────────────────────────
-log "--- CONDITION: ewc ---"
-run_train medical ewc
-run_train legal   ewc --ewc_state checkpoints/ewc/medical/fisher.pt
-run_eval checkpoints/ewc/legal ewc_after_legal_v4
-
-notify "EWC done" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
-    "default" "white_check_mark"
-
-# ─────────────────────────────────────────────
-# Replay
-# ─────────────────────────────────────────────
-log "--- CONDITION: replay ---"
-run_train medical replay
-
-CURRENT_STEP="build_replay_buffer/medical"
-set_step "build_replay_buffer/medical"
-log "START $CURRENT_STEP"
-python build_replay_buffer.py --domain medical 2>&1 | tee -a "$LOG"
-log "DONE  $CURRENT_STEP"
-
-run_train legal replay --replay_buffer data/replay_buffer.jsonl
-run_eval checkpoints/replay/legal replay_after_legal_v4
-
-notify "Replay done" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
-    "default" "white_check_mark"
-
-# ─────────────────────────────────────────────
 # 4-Domain Sequential Chain — Proteus
 # ─────────────────────────────────────────────
-log "--- CONDITION: proteus (4-domain sequential) ---"
+log "--- CHAIN: proteus (medical → legal → code → multilingual) ---"
 
 run_train medical proteus
 run_eval  checkpoints/proteus/medical proteus_seq_after_medical
@@ -236,7 +187,7 @@ run_eval  checkpoints/proteus/code    proteus_seq_after_code
 run_train multilingual proteus --start_from checkpoints/proteus/code
 run_eval  checkpoints/proteus/multilingual proteus_seq_after_multilingual
 
-notify "Proteus 4-domain chain done" \
+notify "Proteus chain done" \
 "$(eval_summary)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
     "default" "white_check_mark"
@@ -244,7 +195,7 @@ Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
 # ─────────────────────────────────────────────
 # 4-Domain Sequential Chain — Full
 # ─────────────────────────────────────────────
-log "--- CONDITION: full (4-domain sequential) ---"
+log "--- CHAIN: full (medical → legal → code → multilingual) ---"
 
 run_train medical full
 run_eval  checkpoints/full/medical full_seq_after_medical
@@ -258,7 +209,7 @@ run_eval  checkpoints/full/code    full_seq_after_code
 run_train multilingual full --start_from checkpoints/full/code
 run_eval  checkpoints/full/multilingual full_seq_after_multilingual
 
-notify "Full 4-domain chain done" \
+notify "Full chain done" \
 "$(eval_summary)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
     "default" "white_check_mark"
@@ -267,12 +218,12 @@ Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
 # Done
 # ─────────────────────────────────────────────
 log "=============================="
-log "All conditions complete."
+log "All chains complete."
 log "Elapsed: $(elapsed_str) | Total spend: $(credit_used)"
 log "=============================="
 
 notify "Proteus COMPLETE" \
-"All conditions done!
+"Both 4-domain chains done!
 Elapsed: $(elapsed_str) | Total: $(credit_used)
 
 $(eval_summary)" \
