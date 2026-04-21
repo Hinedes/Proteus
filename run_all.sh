@@ -219,6 +219,50 @@ Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
     "default" "white_check_mark"
 
 # ─────────────────────────────────────────────
+# 4-Domain Sequential Chain — Proteus
+# ─────────────────────────────────────────────
+log "--- CONDITION: proteus (4-domain sequential) ---"
+
+run_train medical proteus
+run_eval  checkpoints/proteus/medical proteus_seq_after_medical
+
+run_train legal   proteus --start_from checkpoints/proteus/medical
+run_eval  checkpoints/proteus/legal   proteus_seq_after_legal
+
+run_train code    proteus --start_from checkpoints/proteus/legal
+run_eval  checkpoints/proteus/code    proteus_seq_after_code
+
+run_train multilingual proteus --start_from checkpoints/proteus/code
+run_eval  checkpoints/proteus/multilingual proteus_seq_after_multilingual
+
+notify "Proteus 4-domain chain done" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
+    "default" "white_check_mark"
+
+# ─────────────────────────────────────────────
+# 4-Domain Sequential Chain — Full
+# ─────────────────────────────────────────────
+log "--- CONDITION: full (4-domain sequential) ---"
+
+run_train medical full
+run_eval  checkpoints/full/medical full_seq_after_medical
+
+run_train legal   full --start_from checkpoints/full/medical
+run_eval  checkpoints/full/legal   full_seq_after_legal
+
+run_train code    full --start_from checkpoints/full/legal
+run_eval  checkpoints/full/code    full_seq_after_code
+
+run_train multilingual full --start_from checkpoints/full/code
+run_eval  checkpoints/full/multilingual full_seq_after_multilingual
+
+notify "Full 4-domain chain done" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
+    "default" "white_check_mark"
+
+# ─────────────────────────────────────────────
 # Done
 # ─────────────────────────────────────────────
 log "=============================="

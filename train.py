@@ -298,6 +298,9 @@ def main():
                         choices=["medical", "legal", "code", "multilingual"])
     parser.add_argument("--condition",    required=True,
                         choices=["proteus", "full", "lora", "ewc", "replay"])
+    parser.add_argument("--start_from",   type=str, default=None,
+                        help="Load weights from this checkpoint instead of base MODEL_ID. "
+                             "Used for sequential multi-domain chains.")
     parser.add_argument("--max_steps",    type=int,   default=500)
     parser.add_argument("--batch_size",   type=int,   default=2)
     parser.add_argument("--grad_accum",   type=int,   default=8)
@@ -343,9 +346,10 @@ def main():
     # ── Model
     # sdpa: PyTorch built-in fused attention, no head dim restriction, Blackwell-compatible.
     # flash_attention_2 excluded: Gemma 4 has head_dim > 256, FA2 hard limit.
+    _model_source = args.start_from if args.start_from else MODEL_ID
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        _model_source,
         dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
