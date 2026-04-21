@@ -407,14 +407,19 @@ def main():
 
         for layer in layers:
             for proj_name in ("q_proj", "v_proj"):
-                proj  = getattr(layer.self_attn, proj_name)
+                if not hasattr(layer.self_attn, proj_name):
+                    continue
+
+                proj = getattr(layer.self_attn, proj_name)
                 inner = getattr(proj, "linear", proj)
                 in_f, out_f = inner.in_features, inner.out_features
 
                 lora_A = torch.nn.Parameter(
-                    torch.empty(r, in_f, dtype=torch.bfloat16, device=_device))
+                    torch.empty(r, in_f, dtype=torch.bfloat16, device=_device)
+                )
                 lora_B = torch.nn.Parameter(
-                    torch.zeros(out_f, r, dtype=torch.bfloat16, device=_device))
+                    torch.zeros(out_f, r, dtype=torch.bfloat16, device=_device)
+                )
                 torch.nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
 
                 proj.register_parameter("lora_A", lora_A)
@@ -428,9 +433,12 @@ def main():
                         x = input[0]
                         delta = torch.nn.functional.linear(d(x), B @ A) * scaling
                         return output + delta
+
                     return hook
 
-                lora_hooks.append(proj.register_forward_hook(make_hook(lora_A, lora_B, drop)))
+                lora_hooks.append(
+                    proj.register_forward_hook(make_hook(lora_A, lora_B, drop))
+                )
 
         trainable = sum(p.numel() for p in lora_params)
         total     = sum(p.numel() for p in model.parameters())
