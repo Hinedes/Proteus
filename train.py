@@ -266,6 +266,14 @@ def main():
                         help="Path to .jsonl replay buffer (Replay only).")
     parser.add_argument("--replay_ratio", type=float, default=0.3,
                         help="Fraction of each batch drawn from replay buffer.")
+    parser.add_argument("--attention",    type=str,   default="train",
+                        choices=["train", "freeze", "diagonal"],
+                        help=(
+                            "Attention strategy for Proteus condition. "
+                            "'train': all attention layers update (default, Condition 5b). "
+                            "'freeze': all attention frozen (Condition 5a). "
+                            "'diagonal': freeze bottom half, train top half (Condition 5c)."
+                        ))
     parser.add_argument("--compile",      action="store_true",
                         help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
     args = parser.parse_args()
@@ -276,6 +284,8 @@ def main():
     print(f"\n=== Proteus training ===")
     print(f"  Domain:    {args.domain}")
     print(f"  Condition: {args.condition}")
+    if args.condition == "proteus":
+        print(f"  Attention: {args.attention}")
     print(f"  Compile:   {args.compile}")
     print(f"  Output:    {out_dir}\n")
 
@@ -305,6 +315,29 @@ def main():
     if args.condition == "proteus":
         model.train()
         hooks = register_hooks(model)
+        # ── Attention strategy (Proteus only)
+        attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        layers = model.model.language_model.layers
+        n_layers = len(layers)
+        if args.attention == "freeze":
+            # Condition 5a: freeze all attention across all layers
+            for layer in layers:
+                for name in attn_modules:
+                    m = getattr(layer.self_attn, name, None)
+                    if m is not None:
+                        m.weight.requires_grad_(False)
+            print(f"[proteus] Attention: all {n_layers} layers frozen (5a).")
+        elif args.attention == "diagonal":
+            # Condition 5c: freeze bottom half, train top half
+            freeze_up_to = n_layers // 2
+            for i, layer in enumerate(layers):
+                for name in attn_modules:
+                    m = getattr(layer.self_attn, name, None)
+                    if m is not None:
+                        m.weight.requires_grad_(i >= freeze_up_to)
+            print(f"[proteus] Attention: layers 0-{freeze_up_to-1} frozen, {freeze_up_to}-{n_layers-1} trainable (5c).")
+        else:
+            print(f"[proteus] Attention: all {n_layers} layers trainable (5b).")
 
     elif args.condition == "full":
         model.train()
