@@ -45,26 +45,45 @@ elapsed_str() {
 
 credit_used() {
     local secs=$(( $(date +%s) - START_TIME ))
-    printf "\$%.2f" "$(echo "scale=2; $secs / 3600 * $RATE" | bc)"
+    printf "\$%.2f" "$(awk "BEGIN {printf \"%.2f\", $secs / 3600 * $RATE}")"
 }
 
 # ─────────────────────────────────────────────
 # Failure handler
 # ─────────────────────────────────────────────
+STEP_FILE="results/.current_step"
 CURRENT_STEP="unknown"
+
+set_step() {
+    CURRENT_STEP="$1"
+    echo "$1" > "$STEP_FILE"
+}
+
+get_step() {
+    cat "$STEP_FILE" 2>/dev/null || echo "unknown"
+}
+
+# Clean last meaningful log line (skip tqdm bars and empty lines)
+last_clean_log() {
+    grep -E "^\[20|loss|perplexity|DONE|START|CRASH" "$LOG" 2>/dev/null \
+        | tail -1 \
+        || echo "no log yet"
+}
 
 on_error() {
     local exit_code=$?
     local line=$1
-    log "CRASH at line $line (exit $exit_code) during: $CURRENT_STEP"
+    local step
+    step=$(get_step)
+    log "CRASH at line $line (exit $exit_code) during: $step"
     local tail_log
-    tail_log=$(tail -10 "$LOG" 2>/dev/null || echo "no log available")
+    tail_log=$(last_clean_log)
     notify "Proteus CRASHED" \
-"Step: $CURRENT_STEP
-Exit: $exit_code | Elapsed: $(elapsed_str) | Spent: $(credit_used)
+"Step: $step
+Exit: $exit_code
+Elapsed: $(elapsed_str) | Spent: $(credit_used)
 
-Last log:
-$tail_log
+Last: $tail_log
 
 Resume: ./run_all.sh $NTFY_TOPIC" \
         "urgent" "rotating_light"
@@ -80,13 +99,10 @@ trap 'on_error $LINENO' ERR
 heartbeat() {
     while true; do
         sleep 1800
-        local last_line
-        last_line=$(tail -1 "$LOG" 2>/dev/null || echo "no log yet")
         notify "Proteus heartbeat" \
-"Still running.
-Step: $CURRENT_STEP
+"Step: $(get_step)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)
-Last: $last_line" \
+Last: $(last_clean_log)" \
             "low"
     done
 }
@@ -103,17 +119,17 @@ run_train() {
     local domain="$1"
     local condition="$2"
     shift 2
-    CURRENT_STEP="train/$condition/$domain"
+    set_step "train/$condition/$domain"
     log "START $CURRENT_STEP $*"
     python train.py --domain "$domain" --condition "$condition" \
-        --max_steps "$STEPS" "$@" 2>&1 | tee -a "$LOG"
+        --max_steps "$STEPS" --compile "$@" 2>&1 | tee -a "$LOG"
     log "DONE  $CURRENT_STEP"
 }
 
 run_eval() {
     local checkpoint="$1"
     local label="$2"
-    CURRENT_STEP="eval/$label"
+    set_step "eval/$label"
     log "START $CURRENT_STEP"
     python eval.py --checkpoint "$checkpoint" --label "$label" \
         --n_samples "$N_EVAL" 2>&1 | tee -a "$LOG"
@@ -185,6 +201,7 @@ log "--- CONDITION: replay ---"
 run_train medical replay
 
 CURRENT_STEP="build_replay_buffer/medical"
+set_step "build_replay_buffer/medical"
 log "START $CURRENT_STEP"
 python build_replay_buffer.py --domain medical 2>&1 | tee -a "$LOG"
 log "DONE  $CURRENT_STEP"
