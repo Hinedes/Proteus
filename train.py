@@ -348,50 +348,52 @@ def main():
         print("[full] All parameters trainable.")
 
     elif args.condition == "lora":
-        # PEFT get_peft_model fails on Gemma 4 because it wraps Linear in
-        # Gemma4ClippableLinear. We implement LoRA manually instead.
-        # Freeze all parameters, then inject trainable A/B matrices into
-        # q_proj and v_proj across all layers via a wrapper module.
+        # Fast LoRA via forward hooks -- same pattern as Proteus gradient hooks.
+        # Avoids module-wrapping overhead. Caches merged BA so each hook is
+        # one fused matmul instead of two sequential ones.
         import math
 
-        class LoRALinear(torch.nn.Module):
-            """Wraps an existing linear layer with a low-rank adapter."""
-            def __init__(self, base: torch.nn.Module, r: int = 16, alpha: int = 32, dropout: float = 0.05):
-                super().__init__()
-                self.base = base
-                # Support both plain Linear and Gemma4ClippableLinear
-                inner = getattr(base, "linear", base)
-                in_f  = inner.in_features
-                out_f = inner.out_features
-                self.lora_A    = torch.nn.Parameter(torch.empty(r, in_f))
-                self.lora_B    = torch.nn.Parameter(torch.zeros(out_f, r))
-                self.scaling   = alpha / r
-                self.dropout   = torch.nn.Dropout(dropout)
-                torch.nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-
-            def forward(self, x):
-                base_out = self.base(x)
-                lora_out = self.dropout(x) @ self.lora_A.T @ self.lora_B.T
-                return base_out + lora_out * self.scaling
-
-        # Freeze everything
         for p in model.parameters():
             p.requires_grad_(False)
 
-        # Inject LoRA into q_proj and v_proj on every layer
-        lora_modules = []
-        layers = model.model.language_model.layers
+        lora_params = []
+        lora_hooks  = []
+        layers  = model.model.language_model.layers
+        r, alpha, dropout_p = 16, 32, 0.05
+        scaling = alpha / r
+        _device = next(model.parameters()).device
+
         for layer in layers:
             for proj_name in ("q_proj", "v_proj"):
-                original = getattr(layer.self_attn, proj_name)
-                wrapper  = LoRALinear(original, r=16, alpha=32, dropout=0.05)
-                setattr(layer.self_attn, proj_name, wrapper)
-                lora_modules.append(wrapper)
+                proj  = getattr(layer.self_attn, proj_name)
+                inner = getattr(proj, "linear", proj)
+                in_f, out_f = inner.in_features, inner.out_features
 
-        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                lora_A = torch.nn.Parameter(
+                    torch.empty(r, in_f, dtype=torch.bfloat16, device=_device))
+                lora_B = torch.nn.Parameter(
+                    torch.zeros(out_f, r, dtype=torch.bfloat16, device=_device))
+                torch.nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
+
+                proj.register_parameter("lora_A", lora_A)
+                proj.register_parameter("lora_B", lora_B)
+                lora_params.extend([lora_A, lora_B])
+
+                drop = torch.nn.Dropout(dropout_p)
+
+                def make_hook(A, B, d):
+                    def hook(module, input, output):
+                        x = input[0]
+                        delta = torch.nn.functional.linear(d(x), B @ A) * scaling
+                        return output + delta
+                    return hook
+
+                lora_hooks.append(proj.register_forward_hook(make_hook(lora_A, lora_B, drop)))
+
+        trainable = sum(p.numel() for p in lora_params)
         total     = sum(p.numel() for p in model.parameters())
-        print(f"[lora] Injected LoRA into {len(lora_modules)} projections.")
-        print(f"[lora] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
+        print(f"[lora] Registered {len(lora_hooks)} forward hooks (fast path).")
+        print(f"[lora] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
 
     elif args.condition == "ewc":
         model.train()
