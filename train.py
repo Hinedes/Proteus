@@ -466,7 +466,9 @@ def main():
 
     # ── Triton compile (opt-in)
     if args.compile:
-        if args.max_steps < 50:
+        if args.condition == "lora":
+            print("[compile] Skipped for LoRA — custom forward hooks are incompatible with CUDA Graphs (reduce-overhead).")
+        elif args.max_steps < 50:
             print("[compile] Skipped — max_steps < 50, warm-up cost not worth it.")
         else:
             print("[compile] Compiling model with torch.compile (mode=reduce-overhead)...")
