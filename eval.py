@@ -83,7 +83,7 @@ def compute_perplexity(model, tokenizer, records: list[dict], device: str) -> fl
 
             full_ids = full_ids.to(device)
 
-            n_prefix = min(prefix_ids.shape[1], full_ids.shape[1])
+            n_prefix = min(prefix_ids.shape[1], full_ids.shape[1] - 1)
             labels   = full_ids.clone()
             labels[:, :n_prefix] = -100   # mask prompt
 

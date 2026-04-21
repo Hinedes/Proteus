@@ -232,7 +232,11 @@ def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
             )["input_ids"]
 
             # Mask prompt tokens with -100 so loss is only on response
-            n_prefix = min(len(prefix_ids), len(full_ids))
+            # Guard: ensure at least 1 valid label token survives truncation.
+            # Without this, long-prefix datasets (e.g. legal) produce sequences
+            # where prefix alone exceeds MAX_LENGTH, masking all labels to -100
+            # and causing NaN loss that poisons the optimizer state.
+            n_prefix = min(len(prefix_ids), len(full_ids) - 1)
             labels   = [-100] * n_prefix + full_ids[n_prefix:]
 
             all_input_ids.append(full_ids)
