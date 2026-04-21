@@ -487,7 +487,16 @@ def main():
         print(f"[replay] {len(raw_ds)} current + {n_replay} replay = {len(combined)} total")
         raw_ds = combined
 
+    # Truncate BEFORE tokenization — no point processing 238K samples
+    # when training only runs max_steps * effective_batch
+    effective_batch = args.batch_size * args.grad_accum
+    max_samples = args.max_steps * effective_batch * 2  # 2x safety margin
+    if len(raw_ds) > max_samples:
+        print(f"[data] Truncating {len(raw_ds):,} → {max_samples:,} samples (2x needed)")
+        raw_ds = raw_ds.select(range(max_samples))
+
     tokenized = tokenize_dataset(raw_ds, tokenizer)
+
     collator  = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True, pad_to_multiple_of=8)
 
     # ── Training args

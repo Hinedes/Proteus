@@ -11,6 +11,13 @@ NTFY_TOPIC="${1:-proteus-notify}"
 LOG="results/run_all.log"
 STEPS=500
 N_EVAL=100
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_TOKEN=dummy
+export TRANSFORMERS_VERBOSITY=error
+export TOKENIZERS_PARALLELISM=false
+
+# Suppress noisy warnings
+export PYTHONWARNINGS="ignore::UserWarning"
 START_TIME=$(date +%s)
 RATE=1.99   # USD/hr for MI300X
 
@@ -122,7 +129,7 @@ run_train() {
     set_step "train/$condition/$domain"
     log "START $CURRENT_STEP $*"
     python train.py --domain "$domain" --condition "$condition" \
-        --max_steps "$STEPS" --compile "$@" 2>&1 | tee -a "$LOG"
+        --max_steps "$STEPS" --batch_size 8 --grad_accum 2 --compile "$@" 2>&1 | tee -a "$LOG"
     log "DONE  $CURRENT_STEP"
 }
 
