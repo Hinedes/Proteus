@@ -521,8 +521,7 @@ def main():
         bf16                     = True,
         optim                    = "adamw_torch_fused",
         logging_steps            = 10,
-        save_steps               = args.max_steps,   # save once at end
-        save_total_limit         = 1,
+        save_strategy            = "no",         # skip intermediate checkpoints (optimizer.pt is ~32GB)
         report_to                = "none",
         dataloader_num_workers   = 4,
         dataloader_pin_memory    = True,
