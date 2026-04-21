@@ -472,16 +472,9 @@ def main():
             print("[replay] WARNING: no --replay_buffer provided. Running as full fine-tune.")
         print(f"[replay] ratio={args.replay_ratio}")
 
-    # ── Triton compile (opt-in)
-    if args.compile:
-        if args.condition in ("lora", "ewc", "proteus"):
-            pass  # compile incompatible with custom hooks/loss
-        elif args.max_steps < 50:
-            print("[compile] Skipped — max_steps < 50, warm-up cost not worth it.")
-        else:
-            print("[compile] Compiling model with torch.compile (mode=reduce-overhead)...")
-            model = torch.compile(model, mode="reduce-overhead")
-            print("[compile] Done. First batch will trigger Triton kernel compilation.")
+    # ── Triton compile — disabled for now (CUDA Graph issues with ROCm 7.0)
+    # if args.compile:
+    #     model = torch.compile(model, mode="default")
 
     # ── Dataset
     print(f"Loading {args.domain} dataset...")
