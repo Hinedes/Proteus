@@ -18,6 +18,9 @@ RATE=1.99   # USD/hr for MI300X
 
 mkdir -p results
 
+# Fail on error, and fail if any command in a pipeline fails
+set -eo pipefail
+
 # ─────────────────────────────────────────────
 # Logging + notifications
 # ─────────────────────────────────────────────
