@@ -20,9 +20,17 @@ Results are appended to results/eval_log.jsonl for later analysis.
 
 import argparse
 import json
+import logging
 import math
 import os
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", category=UserWarning)
+logging.getLogger("transformer_engine").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer

@@ -12,11 +12,8 @@ LOG="results/run_all.log"
 STEPS=500
 N_EVAL=100
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export HF_TOKEN=dummy
 export TRANSFORMERS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
-
-# Suppress noisy warnings
 export PYTHONWARNINGS="ignore::UserWarning"
 START_TIME=$(date +%s)
 RATE=1.99   # USD/hr for MI300X
