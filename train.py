@@ -6,19 +6,31 @@ Conditions:
   proteus   — Core frozen via gradient hook (the thesis)
   full      — Full fine-tune, no protection
   lora      — LoRA adapters only, base model frozen entirely
+  ewc       — Elastic Weight Consolidation (importance-weighted regularization)
+  replay    — Data replay from previous domains
 
 Usage:
   python train.py --domain medical --condition proteus
   python train.py --domain legal   --condition full   --max_steps 200
   python train.py --domain code    --condition lora
-  python train.py --domain code    --condition proteus --compile   # Triton kernels
+  python train.py --domain code    --condition proteus --compile
+
+  # EWC: first domain needs no prior state; subsequent domains load it
+  python train.py --domain medical --condition ewc
+  python train.py --domain legal   --condition ewc --ewc_state checkpoints/ewc/medical/fisher.pt
+
+  # Replay: pass a .jsonl file of buffered prior-domain examples
+  python train.py --domain legal   --condition replay --replay_buffer data/replay_buffer.jsonl
 """
 
 import argparse
 import json
+import random
+from copy import deepcopy
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from datasets import Dataset
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
@@ -38,7 +50,6 @@ CKPT_DIR    = Path("checkpoints")
 CORE_HIDDEN = 1536
 CORE_MID    = 6144
 MAX_LENGTH  = 512
-
 
 # ─────────────────────────────────────────────
 # Gradient hook (Proteus condition)
@@ -67,15 +78,93 @@ def register_hooks(model):
 
 
 # ─────────────────────────────────────────────
+# EWC — Fisher matrix computation + custom Trainer
+# ─────────────────────────────────────────────
+def compute_fisher(model, dataset, tokenizer, n_samples=200):
+    """
+    Diagonal Fisher estimate via squared gradients on a sample of the dataset.
+    Returns {param_name: fisher_diagonal_tensor}.
+    """
+    model.eval()
+    fisher = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
+    opt_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+
+    indices = random.sample(range(len(dataset)), min(n_samples, len(dataset)))
+    for idx in indices:
+        row = dataset[idx]
+        input_ids = torch.tensor([row["input_ids"]], device=model.device)
+        labels    = torch.tensor([row["labels"]],    device=model.device)
+        model.zero_grad()
+        out  = model(input_ids=input_ids, labels=labels)
+        loss = out.loss
+        loss.backward()
+        for n, p in model.named_parameters():
+            if p.requires_grad and p.grad is not None:
+                fisher[n] += p.grad.detach() ** 2
+
+    for n in fisher:
+        fisher[n] /= len(indices)
+
+    model.train()
+    return fisher, opt_params
+
+
+def save_ewc_state(fisher, opt_params, path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save({"fisher": fisher, "opt_params": opt_params}, path / "fisher.pt")
+    print(f"[ewc] Fisher state saved to {path / 'fisher.pt'}")
+
+
+def load_ewc_state(path: str):
+    state = torch.load(path, map_location="cpu")
+    print(f"[ewc] Loaded Fisher state from {path}")
+    return state["fisher"], state["opt_params"]
+
+
+class EWCTrainer(Trainer):
+    """Trainer that adds EWC penalty to the standard cross-entropy loss."""
+
+    def __init__(self, *args, ewc_lambda=5000.0, fisher=None, opt_params=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ewc_lambda  = ewc_lambda
+        self.fisher      = fisher      # {name: tensor} or None (first domain)
+        self.opt_params  = opt_params  # {name: tensor} or None
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+        loss    = outputs.loss
+
+        if self.fisher is not None and self.opt_params is not None:
+            ewc_penalty = torch.tensor(0.0, device=loss.device)
+            for n, p in model.named_parameters():
+                if n in self.fisher:
+                    f   = self.fisher[n].to(p.device)
+                    opt = self.opt_params[n].to(p.device)
+                    ewc_penalty += (f * (p - opt) ** 2).sum()
+            loss = loss + (self.ewc_lambda / 2.0) * ewc_penalty
+
+        return (loss, outputs) if return_outputs else loss
+
+
+# ─────────────────────────────────────────────
 # Dataset
 # ─────────────────────────────────────────────
-def load_domain(domain: str) -> Dataset:
-    path = DATA_DIR / domain / "train.jsonl"
+def load_domain(domain: str, split: str = "train") -> Dataset:
+    path = DATA_DIR / domain / f"{split}.jsonl"
     records = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             records.append(json.loads(line))
     return Dataset.from_list(records)
+
+
+def load_replay_buffer(path: str) -> list[dict]:
+    records = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            records.append(json.loads(line))
+    print(f"[replay] Loaded {len(records)} records from {path}")
+    return records
 
 
 def format_prompt(row: dict) -> str:
@@ -94,22 +183,53 @@ def format_prompt(row: dict) -> str:
     )
 
 
+def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
+    def tokenize_fn(batch):
+        texts = [
+            format_prompt({
+                "instruction": batch["instruction"][i],
+                "input":       batch.get("input",  [""] * len(batch["instruction"]))[i],
+                "output":      batch["output"][i],
+            })
+            for i in range(len(batch["instruction"]))
+        ]
+        enc = tokenizer(
+            texts,
+            truncation=True,
+            max_length=MAX_LENGTH,
+            padding=False,
+        )
+        enc["labels"] = [ids.copy() for ids in enc["input_ids"]]
+        return enc
+
+    return raw_ds.map(tokenize_fn, batched=True, remove_columns=raw_ds.column_names)
+
+
 # ─────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--domain",     required=True,
+    parser.add_argument("--domain",       required=True,
                         choices=["medical", "legal", "code", "multilingual"])
-    parser.add_argument("--condition",  required=True,
-                        choices=["proteus", "full", "lora"])
-    parser.add_argument("--max_steps",  type=int,   default=500)
-    parser.add_argument("--batch_size", type=int,   default=2)
-    parser.add_argument("--grad_accum", type=int,   default=8)
-    parser.add_argument("--lr",         type=float, default=2e-5)
-    parser.add_argument("--compile",    action="store_true",
-                        help="Compile model with torch.compile (Triton). "
-                             "Adds ~1-2 min warm-up on first run, faster thereafter.")
+    parser.add_argument("--condition",    required=True,
+                        choices=["proteus", "full", "lora", "ewc", "replay"])
+    parser.add_argument("--max_steps",    type=int,   default=500)
+    parser.add_argument("--batch_size",   type=int,   default=2)
+    parser.add_argument("--grad_accum",   type=int,   default=8)
+    parser.add_argument("--lr",           type=float, default=2e-5)
+    parser.add_argument("--ewc_lambda",   type=float, default=5000.0,
+                        help="EWC regularization strength.")
+    parser.add_argument("--ewc_state",    type=str,   default=None,
+                        help="Path to fisher.pt from previous domain (EWC only).")
+    parser.add_argument("--ewc_samples",  type=int,   default=200,
+                        help="Samples used to estimate Fisher diagonal.")
+    parser.add_argument("--replay_buffer",type=str,   default=None,
+                        help="Path to .jsonl replay buffer (Replay only).")
+    parser.add_argument("--replay_ratio", type=float, default=0.3,
+                        help="Fraction of each batch drawn from replay buffer.")
+    parser.add_argument("--compile",      action="store_true",
+                        help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
     args = parser.parse_args()
 
     out_dir = CKPT_DIR / args.condition / args.domain
@@ -132,14 +252,18 @@ def main():
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
         attn_implementation="sdpa",
     )
 
     # ── Condition setup
-    hooks = []
+    hooks   = []
+    fisher  = None
+    opt_params = None
+    trainer_class = Trainer
+
     if args.condition == "proteus":
         model.train()
         hooks = register_hooks(model)
@@ -159,6 +283,21 @@ def main():
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
 
+    elif args.condition == "ewc":
+        model.train()
+        trainer_class = EWCTrainer
+        if args.ewc_state:
+            fisher, opt_params = load_ewc_state(args.ewc_state)
+            print(f"[ewc] lambda={args.ewc_lambda}, prior state loaded.")
+        else:
+            print("[ewc] No prior state — first domain, training without penalty.")
+
+    elif args.condition == "replay":
+        model.train()
+        if not args.replay_buffer:
+            print("[replay] WARNING: no --replay_buffer provided. Running as full fine-tune.")
+        print(f"[replay] ratio={args.replay_ratio}")
+
     # ── Triton compile (opt-in)
     if args.compile:
         if args.max_steps < 50:
@@ -170,65 +309,63 @@ def main():
 
     # ── Dataset
     print(f"Loading {args.domain} dataset...")
-    raw_ds = load_domain(args.domain)
+    raw_ds = load_domain(args.domain, split="train")
 
-    def tokenize_fn(batch):
-        texts = [format_prompt({
-            "instruction": batch["instruction"][i],
-            "input":       batch.get("input", [""] * len(batch["instruction"]))[i],
-            "output":      batch["output"][i],
-        }) for i in range(len(batch["instruction"]))]
-        enc = tokenizer(
-            texts,
-            truncation=True,
-            max_length=MAX_LENGTH,
-            padding=False,
-        )
-        enc["labels"] = enc["input_ids"].copy()
-        return enc
+    if args.condition == "replay" and args.replay_buffer:
+        replay_records = load_replay_buffer(args.replay_buffer)
+        # Interleave replay samples proportionally
+        n_replay = int(len(raw_ds) * args.replay_ratio / (1 - args.replay_ratio))
+        n_replay = min(n_replay, len(replay_records))
+        sampled  = random.sample(replay_records, n_replay)
+        combined = Dataset.from_list(list(raw_ds) + sampled)
+        print(f"[replay] {len(raw_ds)} current + {n_replay} replay = {len(combined)} total")
+        raw_ds = combined
 
-    tokenized = raw_ds.map(
-        tokenize_fn,
-        batched=True,
-        remove_columns=raw_ds.column_names,
-    )
+    tokenized = tokenize_dataset(raw_ds, tokenizer)
+    collator  = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True, pad_to_multiple_of=8)
 
-    # ── Training
+    # ── Training args
     training_args = TrainingArguments(
-        output_dir=str(out_dir),
-        max_steps=args.max_steps,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        gradient_checkpointing=True,
-        learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_steps=50,
-        bf16=True,
-        optim="adamw_torch_fused",
-        logging_steps=10,
-        save_steps=args.max_steps,
-        save_total_limit=1,
-        save_only_model=True,               # skip optimizer state: ~32GB saved to disk, not needed
-        report_to="none",
-        dataloader_num_workers=2,
+        output_dir               = str(out_dir),
+        max_steps                = args.max_steps,
+        per_device_train_batch_size = args.batch_size,
+        gradient_accumulation_steps = args.grad_accum,
+        learning_rate            = args.lr,
+        lr_scheduler_type        = "cosine",
+        warmup_ratio             = 0.05,
+        bf16                     = True,
+        logging_steps            = 10,
+        save_steps               = args.max_steps,   # save once at end
+        save_total_limit         = 1,
+        report_to                = "none",
+        dataloader_num_workers   = 2,
+        remove_unused_columns    = False,
     )
 
-    collator = DataCollatorForSeq2Seq(
-        tokenizer,
-        model=model,
-        padding=True,
-        pad_to_multiple_of=8,
+    # ── Trainer
+    trainer_kwargs = dict(
+        model         = model,
+        args          = training_args,
+        train_dataset = tokenized,
+        data_collator = collator,
     )
+    if args.condition == "ewc":
+        trainer_kwargs.update(
+            ewc_lambda  = args.ewc_lambda,
+            fisher      = fisher,
+            opt_params  = opt_params,
+        )
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized,
-        data_collator=collator,
-    )
+    trainer = trainer_class(**trainer_kwargs)
 
     print("Training...")
     trainer.train()
+
+    # ── EWC: compute and save Fisher state for next domain
+    if args.condition == "ewc":
+        print("[ewc] Computing Fisher matrix for next domain...")
+        new_fisher, new_opt = compute_fisher(model, tokenized, tokenizer, n_samples=args.ewc_samples)
+        save_ewc_state(new_fisher, new_opt, out_dir)
 
     # ── Cleanup hooks before save
     for h in hooks:
