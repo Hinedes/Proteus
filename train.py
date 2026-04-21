@@ -466,8 +466,8 @@ def main():
 
     # ── Triton compile (opt-in)
     if args.compile:
-        if args.condition == "lora":
-            print("[compile] Skipped for LoRA — custom forward hooks are incompatible with CUDA Graphs (reduce-overhead).")
+        if args.condition in ("lora", "ewc", "proteus"):
+            print(f"[compile] Skipped for {args.condition} — custom hooks/loss incompatible with CUDA Graphs (reduce-overhead).")
         elif args.max_steps < 50:
             print("[compile] Skipped — max_steps < 50, warm-up cost not worth it.")
         else:
