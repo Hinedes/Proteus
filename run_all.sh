@@ -1,4 +1,5 @@
 #!/bin/bash
+chmod +x "$0"
 # Proteus — Full Experiment Runner v2
 # - Failure detection: notifies immediately on any crash with the error
 # - Heartbeat: pings every 30 minutes with current progress
