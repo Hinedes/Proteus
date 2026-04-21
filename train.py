@@ -183,24 +183,62 @@ def format_prompt(row: dict) -> str:
     )
 
 
+RESPONSE_KEY = "### Response:\n"
+
+
+def format_prompt_parts(row: dict) -> tuple[str, str]:
+    """Returns (prompt_prefix, response_text) separately for label masking."""
+    instruction = row["instruction"]
+    inp         = row.get("input", "").strip()
+    output      = row["output"]
+    if inp:
+        prefix = (
+            f"### Instruction:\n{instruction}\n\n"
+            f"### Input:\n{inp}\n\n"
+            f"{RESPONSE_KEY}"
+        )
+    else:
+        prefix = (
+            f"### Instruction:\n{instruction}\n\n"
+            f"{RESPONSE_KEY}"
+        )
+    return prefix, output
+
+
 def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
     def tokenize_fn(batch):
-        texts = [
-            format_prompt({
+        all_input_ids = []
+        all_labels    = []
+
+        for i in range(len(batch["instruction"])):
+            prefix, response = format_prompt_parts({
                 "instruction": batch["instruction"][i],
-                "input":       batch.get("input",  [""] * len(batch["instruction"]))[i],
+                "input":       batch.get("input", [""] * len(batch["instruction"]))[i],
                 "output":      batch["output"][i],
             })
-            for i in range(len(batch["instruction"]))
-        ]
-        enc = tokenizer(
-            texts,
-            truncation=True,
-            max_length=MAX_LENGTH,
-            padding=False,
-        )
-        enc["labels"] = [ids.copy() for ids in enc["input_ids"]]
-        return enc
+
+            # Tokenize prefix and full sequence separately to find boundary
+            prefix_ids = tokenizer(
+                prefix,
+                truncation=False,
+                add_special_tokens=True,
+            )["input_ids"]
+
+            full_ids = tokenizer(
+                prefix + response,
+                truncation=True,
+                max_length=MAX_LENGTH,
+                add_special_tokens=True,
+            )["input_ids"]
+
+            # Mask prompt tokens with -100 so loss is only on response
+            n_prefix = min(len(prefix_ids), len(full_ids))
+            labels   = [-100] * n_prefix + full_ids[n_prefix:]
+
+            all_input_ids.append(full_ids)
+            all_labels.append(labels)
+
+        return {"input_ids": all_input_ids, "labels": all_labels}
 
     return raw_ds.map(tokenize_fn, batched=True, remove_columns=raw_ds.column_names)
 
@@ -252,7 +290,7 @@ def main():
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
         attn_implementation="sdpa",
@@ -332,7 +370,7 @@ def main():
         gradient_accumulation_steps = args.grad_accum,
         learning_rate            = args.lr,
         lr_scheduler_type        = "cosine",
-        warmup_ratio             = 0.05,
+        warmup_steps             = 25,
         bf16                     = True,
         logging_steps            = 10,
         save_steps               = args.max_steps,   # save once at end
