@@ -36,8 +36,9 @@ notify() {
     curl -s \
         -H "Title: $title" \
         -H "Priority: $priority" \
+        -H "Markdown: yes" \
         ${tags:+-H "Tags: $tags"} \
-        -d "$message" \
+        --data-raw "$message" \
         "https://ntfy.sh/$NTFY_TOPIC" > /dev/null || true
 }
 

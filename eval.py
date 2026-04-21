@@ -135,19 +135,40 @@ def main():
     print(f"  Samples:    {args.n_samples} per domain")
     print(f"  Device:     {device}\n")
 
+    from pathlib import Path as _Path
+    import json as _json
+
+    _adapter_cfg = _Path(args.checkpoint) / "adapter_config.json"
+    _base_model_id = args.checkpoint
+    if _adapter_cfg.exists():
+        _base_model_id = _json.loads(_adapter_cfg.read_text()).get("base_model_name_or_path", MODEL_ID)
+
     print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(_base_model_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     print("Loading model...")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint,
-        dtype=torch.bfloat16,
-        device_map="cuda",
-        trust_remote_code=True,
-        attn_implementation="sdpa",
-    )
+    if _adapter_cfg.exists():
+        # LoRA / PEFT checkpoint — load base model then apply adapter
+        from peft import PeftModel
+
+        model = AutoModelForCausalLM.from_pretrained(
+            _base_model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+            trust_remote_code=True,
+            attn_implementation="sdpa",
+        )
+        model = PeftModel.from_pretrained(model, args.checkpoint)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.checkpoint,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+            trust_remote_code=True,
+            attn_implementation="sdpa",
+        )
 
     results = {"label": args.label, "checkpoint": str(args.checkpoint), "domains": {}}
 
