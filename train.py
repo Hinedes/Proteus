@@ -348,15 +348,50 @@ def main():
         print("[full] All parameters trainable.")
 
     elif args.condition == "lora":
-        lora_cfg = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
-            target_modules=["q_proj", "v_proj"],
-        )
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
+        # PEFT get_peft_model fails on Gemma 4 because it wraps Linear in
+        # Gemma4ClippableLinear. We implement LoRA manually instead.
+        # Freeze all parameters, then inject trainable A/B matrices into
+        # q_proj and v_proj across all layers via a wrapper module.
+        import math
+
+        class LoRALinear(torch.nn.Module):
+            """Wraps an existing linear layer with a low-rank adapter."""
+            def __init__(self, base: torch.nn.Module, r: int = 16, alpha: int = 32, dropout: float = 0.05):
+                super().__init__()
+                self.base = base
+                # Support both plain Linear and Gemma4ClippableLinear
+                inner = getattr(base, "linear", base)
+                in_f  = inner.in_features
+                out_f = inner.out_features
+                self.lora_A    = torch.nn.Parameter(torch.empty(r, in_f))
+                self.lora_B    = torch.nn.Parameter(torch.zeros(out_f, r))
+                self.scaling   = alpha / r
+                self.dropout   = torch.nn.Dropout(dropout)
+                torch.nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+
+            def forward(self, x):
+                base_out = self.base(x)
+                lora_out = self.dropout(x) @ self.lora_A.T @ self.lora_B.T
+                return base_out + lora_out * self.scaling
+
+        # Freeze everything
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+        # Inject LoRA into q_proj and v_proj on every layer
+        lora_modules = []
+        layers = model.model.language_model.layers
+        for layer in layers:
+            for proj_name in ("q_proj", "v_proj"):
+                original = getattr(layer.self_attn, proj_name)
+                wrapper  = LoRALinear(original, r=16, alpha=32, dropout=0.05)
+                setattr(layer.self_attn, proj_name, wrapper)
+                lora_modules.append(wrapper)
+
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total     = sum(p.numel() for p in model.parameters())
+        print(f"[lora] Injected LoRA into {len(lora_modules)} projections.")
+        print(f"[lora] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)")
 
     elif args.condition == "ewc":
         model.train()
