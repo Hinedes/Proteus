@@ -103,6 +103,67 @@ def compute_perplexity(model, tokenizer, records: list[dict], device: str) -> fl
     return math.exp(mean_nll)
 
 
+def apply_custom_lora(model, checkpoint_path: str):
+    """
+    Re-registers custom hook-based LoRA weights saved by train.py.
+    train.py registers lora_A/lora_B as named parameters on each projection
+    and saves them into model.safetensors via trainer.save_model().
+    AutoModelForCausalLM.from_pretrained drops them as UNEXPECTED because
+    the base architecture has no slots for them. This function:
+      1. Loads the safetensors to find all lora_A/lora_B tensors
+      2. Re-registers them as Parameters on the projection modules
+      3. Re-registers the forward hooks that apply the LoRA delta
+    """
+    from safetensors.torch import load_file
+    from pathlib import Path as _Path
+
+    sf_path = _Path(checkpoint_path) / "model.safetensors"
+    if not sf_path.exists():
+        print("[lora] No model.safetensors found — skipping LoRA apply.")
+        return []
+
+    state = load_file(str(sf_path))
+    lora_keys = {k: v for k, v in state.items() if "lora_A" in k or "lora_B" in k}
+    if not lora_keys:
+        print("[lora] No lora_A/lora_B keys in checkpoint — skipping LoRA apply.")
+        return []
+
+    r       = next(v for k, v in lora_keys.items() if "lora_A" in k).shape[0]
+    alpha   = r * 2   # matches train.py: r=16, alpha=32 → scaling=2.0
+    scaling = alpha / r
+
+    hooks  = []
+    layers = model.model.language_model.layers
+    _dev   = next(model.parameters()).device
+
+    for layer_idx, layer in enumerate(layers):
+        for proj_name in ("q_proj", "v_proj"):
+            if not hasattr(layer.self_attn, proj_name):
+                continue
+            key_A = f"model.language_model.layers.{layer_idx}.self_attn.{proj_name}.lora_A"
+            key_B = f"model.language_model.layers.{layer_idx}.self_attn.{proj_name}.lora_B"
+            if key_A not in lora_keys or key_B not in lora_keys:
+                continue
+
+            proj   = getattr(layer.self_attn, proj_name)
+            lora_A = torch.nn.Parameter(lora_keys[key_A].to(_dev), requires_grad=False)
+            lora_B = torch.nn.Parameter(lora_keys[key_B].to(_dev), requires_grad=False)
+            proj.register_parameter("lora_A", lora_A)
+            proj.register_parameter("lora_B", lora_B)
+
+            def make_hook(A, B):
+                def hook(module, input, output):
+                    x = input[0]
+                    delta = torch.nn.functional.linear(x, B @ A) * scaling
+                    return output + delta
+                return hook
+
+            hooks.append(proj.register_forward_hook(make_hook(lora_A, lora_B)))
+
+    print(f"[lora] Applied {len(hooks)} LoRA hooks from checkpoint.")
+    return hooks
+
+
 def load_eval_records(domain: str, n_samples: int = 500) -> list[dict]:
     path = DATA_DIR / domain / "eval.jsonl"
     records = []
@@ -169,6 +230,8 @@ def main():
             trust_remote_code=True,
             attn_implementation="sdpa",
         )
+        # Custom hook-based LoRA (train.py fast path) — re-wire if lora keys present
+        apply_custom_lora(model, args.checkpoint)
 
     results = {"label": args.label, "checkpoint": str(args.checkpoint), "domains": {}}
 
