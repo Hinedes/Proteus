@@ -155,7 +155,7 @@ def main():
 
         model = AutoModelForCausalLM.from_pretrained(
             _base_model_id,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="cuda",
             trust_remote_code=True,
             attn_implementation="sdpa",
@@ -164,7 +164,7 @@ def main():
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.checkpoint,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="cuda",
             trust_remote_code=True,
             attn_implementation="sdpa",

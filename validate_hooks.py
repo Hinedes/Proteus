@@ -8,7 +8,7 @@ DEVICE       = "cuda"
 
 print("Loading model...")
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, torch_dtype=torch.bfloat16, trust_remote_code=True,
+    MODEL_ID, dtype=torch.bfloat16, trust_remote_code=True,
 ).to(DEVICE)
 model.train()
 print("Model loaded.\n")
