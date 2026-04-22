@@ -9,7 +9,7 @@ chmod +x "$0"
 
 NTFY_TOPIC="${1:-proteus-notify}"
 LOG="results/run_all.log"
-STEPS=500
+STEPS=2000
 N_EVAL=100
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_VERBOSITY=error
