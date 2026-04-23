@@ -606,7 +606,6 @@ def main():
         attn_implementation="sdpa",
     )
 
-    model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
     print("Amputating vision and audio encoders...")
@@ -661,7 +660,7 @@ def main():
         lr_scheduler_type        = "cosine",
         warmup_steps             = 25,
         bf16                     = True,
-        optim                    = "adamw_bnb_8bit",
+        optim                    = "adamw_torch_fused",
         logging_steps            = 10,
         save_strategy            = "no",         # skip intermediate checkpoints (optimizer.pt is ~32GB)
         report_to                = "none",
