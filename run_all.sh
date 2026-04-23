@@ -238,7 +238,7 @@ run_train() {
     log "START $CURRENT_STEP $*"
     start_status_renderer
     python train.py --domain "$domain" --condition "$condition" \
-        --max_steps "$STEPS" --batch_size 16 --grad_accum 1 --compile --status_file "$STATUS_FILE" "$@" 2>&1 | tee -a "$LOG"
+        --max_steps "$STEPS" --batch_size 16 --grad_accum 1 --status_file "$STATUS_FILE" "$@" 2>&1 | tee -a "$LOG"
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
 }
