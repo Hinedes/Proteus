@@ -213,7 +213,7 @@ def register_hooks(model):
 # ─────────────────────────────────────────────
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
-def compute_fisher(model, dataset, n_samples=200, batch_size=4):
+def compute_fisher(model, dataset, n_samples=200, batch_size=16):
     """
     Diagonal Fisher estimate via squared gradients on a sample of the dataset.
     Batched: processes batch_size samples per backward pass instead of 1.
@@ -351,7 +351,7 @@ def apply_proteus_attention_strategy(model, attention_mode: str):
         print(f"[proteus] Attention: all {n_layers} layers trainable (5b).")
 
 
-def register_lora_fast_hooks(model, r=16, alpha=32, dropout_p=0.05):
+def register_lora_fast_hooks(model, r=64, alpha=128, dropout_p=0.05):
     """Register fast hook-based LoRA on q_proj/v_proj across all transformer layers."""
     import math
 
@@ -691,7 +691,7 @@ def main():
 
     tokenized = tokenize_dataset(raw_ds, tokenizer)
 
-    collator  = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True, pad_to_multiple_of=8)
+    collator  = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True, pad_to_multiple_of=128)
 
     # ── Training args
     training_args = TrainingArguments(
