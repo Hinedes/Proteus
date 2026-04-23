@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import time
 import warnings
 from pathlib import Path
 
@@ -44,6 +45,28 @@ DOMAINS     = ["medical", "legal", "code", "multilingual"]
 RESPONSE_KEY = "### Response:\n"
 
 
+class StatusWriter:
+    """Best-effort JSON status writer for external progress rendering."""
+
+    def __init__(self, path):
+        self.path = Path(path) if path else None
+
+    def emit(self, payload: dict):
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            data = dict(payload)
+            data["ts"] = time.time()
+            tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, self.path)
+        except Exception:
+            # Never let status I/O interfere with evaluation.
+            pass
+
+
 def format_prompt_parts(row: dict) -> tuple[str, str]:
     instruction = row["instruction"]
     inp         = row.get("input", "").strip()
@@ -62,16 +85,18 @@ def format_prompt_parts(row: dict) -> tuple[str, str]:
     return prefix, output
 
 
-def compute_perplexity(model, tokenizer, records: list[dict], device: str) -> float:
+def compute_perplexity(model, tokenizer, records: list[dict], device: str, progress_cb=None) -> float:
     """
     Compute mean perplexity over response tokens only (same masking as training).
     """
     model.eval()
     total_nll = 0.0
     total_tokens = 0
+    started = time.time()
+    total_records = len(records)
 
     with torch.no_grad():
-        for row in records:
+        for i, row in enumerate(records, start=1):
             prefix, response = format_prompt_parts(row)
 
             prefix_ids = tokenizer(
@@ -97,12 +122,21 @@ def compute_perplexity(model, tokenizer, records: list[dict], device: str) -> fl
 
             n_response_tokens = (labels != -100).sum().item()
             if n_response_tokens == 0:
+                if progress_cb is not None:
+                    elapsed = max(time.time() - started, 1e-6)
+                    running_ppl = math.exp(total_nll / total_tokens) if total_tokens > 0 else float("inf")
+                    progress_cb(i, total_records, elapsed, running_ppl)
                 continue
 
             outputs = model(input_ids=full_ids, labels=labels)
             # outputs.loss is mean NLL over unmasked tokens
             total_nll    += outputs.loss.item() * n_response_tokens
             total_tokens += n_response_tokens
+
+            if progress_cb is not None:
+                elapsed = max(time.time() - started, 1e-6)
+                running_ppl = math.exp(total_nll / total_tokens) if total_tokens > 0 else float("inf")
+                progress_cb(i, total_records, elapsed, running_ppl)
 
     if total_tokens == 0:
         return float("inf")
@@ -192,10 +226,30 @@ def main():
     parser.add_argument("--domains",    nargs="+", default=DOMAINS,
                         choices=DOMAINS,
                         help="Subset of domains to evaluate (default: all 4).")
+    parser.add_argument("--status_file", type=str, default=None,
+                        help="Optional JSON status file path for live progress rendering.")
     args = parser.parse_args()
 
     RESULTS_DIR.mkdir(exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    status_writer = StatusWriter(args.status_file)
+    overall_total = max(args.n_samples * len(args.domains), 1)
+    overall_done = 0
+
+    status_writer.emit({
+        "phase": "eval",
+        "state": "initializing",
+        "label": args.label,
+        "domain": "",
+        "domain_index": 0,
+        "domains_total": len(args.domains),
+        "sample": 0,
+        "sample_total": 0,
+        "overall_step": 0,
+        "overall_total": overall_total,
+        "it_s": 0.0,
+        "ppl_so_far": None,
+    })
 
     print(f"\n=== Proteus Eval ===")
     print(f"  Checkpoint: {args.checkpoint}")
@@ -243,11 +297,59 @@ def main():
 
     results = {"label": args.label, "checkpoint": str(args.checkpoint), "domains": {}}
 
-    for domain in args.domains:
+    for domain_index, domain in enumerate(args.domains, start=1):
         print(f"Evaluating {domain}...")
         records = load_eval_records(domain, n_samples=args.n_samples)
-        ppl = compute_perplexity(model, tokenizer, records, device)
+
+        status_writer.emit({
+            "phase": "eval",
+            "state": "running",
+            "label": args.label,
+            "domain": domain,
+            "domain_index": domain_index,
+            "domains_total": len(args.domains),
+            "sample": 0,
+            "sample_total": len(records),
+            "overall_step": overall_done,
+            "overall_total": max(overall_total, overall_done + len(records)),
+            "it_s": 0.0,
+            "ppl_so_far": None,
+        })
+
+        def _progress(sample_idx, sample_total, elapsed_s, running_ppl):
+            status_writer.emit({
+                "phase": "eval",
+                "state": "running",
+                "label": args.label,
+                "domain": domain,
+                "domain_index": domain_index,
+                "domains_total": len(args.domains),
+                "sample": sample_idx,
+                "sample_total": sample_total,
+                "overall_step": overall_done + sample_idx,
+                "overall_total": max(overall_total, overall_done + sample_total),
+                "it_s": (sample_idx / elapsed_s) if elapsed_s > 0 else 0.0,
+                "ppl_so_far": running_ppl,
+            })
+
+        ppl = compute_perplexity(model, tokenizer, records, device, progress_cb=_progress)
         results["domains"][domain] = round(ppl, 4)
+        overall_done += len(records)
+
+        status_writer.emit({
+            "phase": "eval",
+            "state": "domain_done",
+            "label": args.label,
+            "domain": domain,
+            "domain_index": domain_index,
+            "domains_total": len(args.domains),
+            "sample": len(records),
+            "sample_total": len(records),
+            "overall_step": overall_done,
+            "overall_total": max(overall_total, overall_done),
+            "it_s": 0.0,
+            "ppl_so_far": ppl,
+        })
         print(f"  [{domain}] perplexity = {ppl:.4f}")
 
     # Append to log
@@ -259,6 +361,21 @@ def main():
     print("\nSummary:")
     for domain, ppl in results["domains"].items():
         print(f"  {domain:15s}  ppl = {ppl:.4f}")
+
+    status_writer.emit({
+        "phase": "eval",
+        "state": "done",
+        "label": args.label,
+        "domain": "",
+        "domain_index": len(args.domains),
+        "domains_total": len(args.domains),
+        "sample": 0,
+        "sample_total": 0,
+        "overall_step": overall_done,
+        "overall_total": max(overall_total, overall_done),
+        "it_s": 0.0,
+        "ppl_so_far": None,
+    })
 
 
 if __name__ == "__main__":

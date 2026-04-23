@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import random
+import time
 import warnings
 from copy import deepcopy
 from pathlib import Path
@@ -48,6 +49,7 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 
@@ -60,6 +62,82 @@ CKPT_DIR    = Path("checkpoints")
 CORE_HIDDEN = 1536
 CORE_MID    = 6144
 MAX_LENGTH  = 512
+
+
+class StatusWriter:
+    """Best-effort JSON status writer for external progress rendering."""
+
+    def __init__(self, path):
+        self.path = Path(path) if path else None
+
+    def emit(self, payload: dict):
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            data = dict(payload)
+            data["ts"] = time.time()
+            tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, self.path)
+        except Exception:
+            # Never let status I/O interfere with training.
+            pass
+
+
+class TrainStatusCallback(TrainerCallback):
+    """Streams step-level metrics for shell-side single-line rendering."""
+
+    def __init__(self, writer: StatusWriter, condition: str, domain: str, total_steps: int):
+        self.writer = writer
+        self.condition = condition
+        self.domain = domain
+        self.total_steps = total_steps
+        self._start_time = None
+        self._last_loss = None
+
+    def _emit(self, state_label: str, step: int):
+        if self._start_time is None:
+            self._start_time = time.time()
+
+        total = max(int(self.total_steps), 0)
+        step = max(int(step), 0)
+        elapsed = max(time.time() - self._start_time, 1e-6)
+        it_s = step / elapsed if step > 0 else 0.0
+        eta_s = None
+        if total > 0 and it_s > 0.0 and step < total:
+            eta_s = (total - step) / it_s
+
+        payload = {
+            "phase": "train",
+            "state": state_label,
+            "condition": self.condition,
+            "domain": self.domain,
+            "step": step,
+            "total_steps": total,
+            "it_s": it_s,
+            "eta_s": eta_s,
+        }
+        if self._last_loss is not None:
+            payload["loss"] = float(self._last_loss)
+        self.writer.emit(payload)
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self._start_time = time.time()
+        self._emit("running", state.global_step)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self._emit("running", state.global_step)
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        log_data = logs if isinstance(logs, dict) else kwargs.get("logs")
+        if isinstance(log_data, dict) and log_data.get("loss") is not None:
+            self._last_loss = log_data["loss"]
+        self._emit("running", state.global_step)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self._emit("done", state.global_step)
 
 # ─────────────────────────────────────────────
 # Gradient hook (Proteus condition)
@@ -333,10 +411,24 @@ def main():
                         ))
     parser.add_argument("--compile",      action="store_true",
                         help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
+    parser.add_argument("--status_file",  type=str,   default=None,
+                        help="Optional JSON status file path for live progress rendering.")
     args = parser.parse_args()
 
     out_dir = CKPT_DIR / args.condition / args.domain
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    status_writer = StatusWriter(args.status_file)
+    status_writer.emit({
+        "phase": "train",
+        "state": "initializing",
+        "condition": args.condition,
+        "domain": args.domain,
+        "step": 0,
+        "total_steps": args.max_steps,
+        "it_s": 0.0,
+        "eta_s": None,
+    })
 
     print(f"\n=== Proteus training ===")
     print(f"  Domain:    {args.domain}")
@@ -551,9 +643,28 @@ def main():
         )
 
     trainer = trainer_class(**trainer_kwargs)
+    trainer.add_callback(
+        TrainStatusCallback(
+            writer=status_writer,
+            condition=args.condition,
+            domain=args.domain,
+            total_steps=args.max_steps,
+        )
+    )
 
     print("Training...")
     trainer.train()
+
+    status_writer.emit({
+        "phase": "train",
+        "state": "saving",
+        "condition": args.condition,
+        "domain": args.domain,
+        "step": args.max_steps,
+        "total_steps": args.max_steps,
+        "it_s": 0.0,
+        "eta_s": 0.0,
+    })
 
     # ── EWC: compute and save Fisher state for next domain
     if args.condition == "ewc":
@@ -567,6 +678,16 @@ def main():
 
     trainer.save_model(str(out_dir))
     tokenizer.save_pretrained(str(out_dir))
+    status_writer.emit({
+        "phase": "train",
+        "state": "done",
+        "condition": args.condition,
+        "domain": args.domain,
+        "step": args.max_steps,
+        "total_steps": args.max_steps,
+        "it_s": 0.0,
+        "eta_s": 0.0,
+    })
     print(f"\nDone. Checkpoint saved to {out_dir}")
 
 

@@ -57,7 +57,9 @@ credit_used() {
 # Failure handler
 # ─────────────────────────────────────────────
 STEP_FILE="results/.current_step"
+STATUS_FILE="results/.live_status.json"
 CURRENT_STEP="unknown"
+STATUS_RENDER_PID=""
 
 set_step() {
     CURRENT_STEP="$1"
@@ -74,11 +76,118 @@ last_clean_log() {
         || echo "no log yet"
 }
 
+format_status_line() {
+    python3 - "$STATUS_FILE" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("", end="")
+    raise SystemExit(0)
+
+def fmt_eta(seconds):
+    if seconds is None:
+        return "--:--"
+    try:
+        secs = int(max(0, float(seconds)))
+    except Exception:
+        return "--:--"
+    mins, sec = divmod(secs, 60)
+    hrs, mins = divmod(mins, 60)
+    if hrs:
+        return f"{hrs:02d}:{mins:02d}:{sec:02d}"
+    return f"{mins:02d}:{sec:02d}"
+
+phase = data.get("phase")
+state = str(data.get("state", ""))
+
+if phase == "train":
+    step = int(data.get("step", 0) or 0)
+    total = int(data.get("total_steps", 0) or 0)
+    pct = (100.0 * step / total) if total > 0 else 0.0
+    it_s = float(data.get("it_s", 0.0) or 0.0)
+    eta = fmt_eta(data.get("eta_s"))
+    loss = data.get("loss")
+    if isinstance(loss, (int, float)) and math.isfinite(float(loss)):
+        loss_txt = f"{float(loss):.4f}"
+    else:
+        loss_txt = "--"
+    condition = str(data.get("condition", "?"))
+    domain = str(data.get("domain", "?"))
+    print(
+        f"[train {condition}/{domain}] {step}/{total} ({pct:5.1f}%) "
+        f"| {it_s:6.2f} it/s | eta {eta} | loss {loss_txt} | {state}",
+        end="",
+    )
+elif phase == "eval":
+    domain = str(data.get("domain", "?"))
+    domain_index = int(data.get("domain_index", 0) or 0)
+    domains_total = int(data.get("domains_total", 0) or 0)
+    sample = int(data.get("sample", 0) or 0)
+    sample_total = int(data.get("sample_total", 0) or 0)
+    overall_step = int(data.get("overall_step", 0) or 0)
+    overall_total = int(data.get("overall_total", 0) or 0)
+    pct = (100.0 * overall_step / overall_total) if overall_total > 0 else 0.0
+    it_s = float(data.get("it_s", 0.0) or 0.0)
+    ppl = data.get("ppl_so_far")
+    if isinstance(ppl, (int, float)) and math.isfinite(float(ppl)):
+        ppl_txt = f"{float(ppl):.3f}"
+    else:
+        ppl_txt = "--"
+    print(
+        f"[eval {domain_index}/{domains_total} {domain}] sample {sample}/{sample_total} "
+        f"| overall {overall_step}/{overall_total} ({pct:5.1f}%) "
+        f"| {it_s:6.2f} it/s | ppl~ {ppl_txt} | {state}",
+        end="",
+    )
+else:
+    print("", end="")
+PY
+}
+
+start_status_renderer() {
+    if [[ ! -t 2 ]]; then
+        return
+    fi
+    rm -f "$STATUS_FILE"
+    : > "$STATUS_FILE"
+    (
+        while true; do
+            if [[ -s "$STATUS_FILE" ]]; then
+                line=$(format_status_line)
+                if [[ -n "$line" ]]; then
+                    printf "\r\033[2K%s" "$line" >&2
+                fi
+            fi
+            sleep 1
+        done
+    ) &
+    STATUS_RENDER_PID=$!
+}
+
+stop_status_renderer() {
+    if [[ -n "${STATUS_RENDER_PID:-}" ]]; then
+        kill "$STATUS_RENDER_PID" 2>/dev/null || true
+        wait "$STATUS_RENDER_PID" 2>/dev/null || true
+        STATUS_RENDER_PID=""
+    fi
+    if [[ -t 2 ]]; then
+        printf "\r\033[2K" >&2
+    fi
+    rm -f "$STATUS_FILE"
+}
+
 on_error() {
     local exit_code=$?
     local line=$1
     local step
     step=$(get_step)
+    stop_status_renderer
     log "CRASH at line $line (exit $exit_code) during: $step"
     local tail_log
     tail_log=$(last_clean_log)
@@ -91,7 +200,7 @@ Last: $tail_log
 
 Resume manually from failed step." \
         "urgent" "rotating_light"
-    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    kill "${HEARTBEAT_PID:-}" 2>/dev/null || true
     exit $exit_code
 }
 
@@ -113,8 +222,8 @@ Last: $(last_clean_log)" \
 
 heartbeat &
 HEARTBEAT_PID=$!
-trap 'kill $HEARTBEAT_PID 2>/dev/null; on_error $LINENO' ERR
-trap 'kill $HEARTBEAT_PID 2>/dev/null' EXIT
+trap 'on_error $LINENO' ERR
+trap 'stop_status_renderer; kill ${HEARTBEAT_PID:-} 2>/dev/null' EXIT
 
 # ─────────────────────────────────────────────
 # Helpers
@@ -125,8 +234,10 @@ run_train() {
     shift 2
     set_step "train/$condition/$domain"
     log "START $CURRENT_STEP $*"
+    start_status_renderer
     python train.py --domain "$domain" --condition "$condition" \
-        --max_steps "$STEPS" --batch_size 16 --grad_accum 1 --compile "$@" 2>&1 | tee -a "$LOG"
+        --max_steps "$STEPS" --batch_size 16 --grad_accum 1 --compile --status_file "$STATUS_FILE" "$@" 2>&1 | tee -a "$LOG"
+    stop_status_renderer
     log "DONE  $CURRENT_STEP"
 }
 
@@ -135,8 +246,10 @@ run_eval() {
     local label="$2"
     set_step "eval/$label"
     log "START $CURRENT_STEP"
+    start_status_renderer
     python eval.py --checkpoint "$checkpoint" --label "$label" \
-        --n_samples "$N_EVAL" 2>&1 | tee -a "$LOG"
+        --n_samples "$N_EVAL" --status_file "$STATUS_FILE" 2>&1 | tee -a "$LOG"
+    stop_status_renderer
     log "DONE  $CURRENT_STEP"
 }
 
