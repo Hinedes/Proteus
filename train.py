@@ -573,8 +573,8 @@ def main():
     # ── Triton compile — Fixed for ROCm 7.0
     if args.compile:
         print("Compiling model with Triton (CUDA graphs disabled)...")
-        import torch._dynamo
-        torch._dynamo.config.suppress_errors = True
+        from torch import _dynamo
+        _dynamo.config.suppress_errors = True
         model = torch.compile(
             model,
             backend="inductor",
