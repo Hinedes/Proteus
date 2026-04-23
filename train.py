@@ -420,8 +420,13 @@ def maybe_compile_model(model, enable_compile: bool):
     print("Compiling model with Triton (CUDA graphs disabled)...")
     try:
         from torch import _dynamo
+        from torch._inductor import config as inductor_config
 
         _dynamo.config.suppress_errors = True
+        if hasattr(inductor_config.triton, "cudagraphs"):
+            inductor_config.triton.cudagraphs = False
+        if hasattr(inductor_config.triton, "cudagraph_trees"):
+            inductor_config.triton.cudagraph_trees = False
         return torch.compile(
             model,
             mode="max-autotune",
