@@ -7,6 +7,9 @@ chmod +x "$0"
 # Usage:
 #   ./run_all.sh YOUR_NTFY_TOPIC
 
+export FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
+export FLASH_ATTENTION_TRITON_AMD_AUTOTUNE="TRUE"
+
 NTFY_TOPIC="${1:-proteus-notify}"
 LOG="results/run_all.log"
 STEPS=2000
