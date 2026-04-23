@@ -267,7 +267,7 @@ def main():
         _base_model_id = _json.loads(_adapter_cfg.read_text()).get("base_model_name_or_path", MODEL_ID)
 
     print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(_base_model_id)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
