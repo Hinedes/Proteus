@@ -603,6 +603,8 @@ def main():
                         ))
     parser.add_argument("--compile",      action="store_true",
                         help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
+    parser.add_argument("--out_dir",      type=str,   default=None,
+                        help="Override output checkpoint directory.")
     parser.add_argument("--status_file",  type=str,   default=None,
                         help="Optional JSON status file path for live progress rendering.")
     args = parser.parse_args()
@@ -611,7 +613,7 @@ def main():
     except ValueError as exc:
         parser.error(str(exc))
 
-    out_dir = CKPT_DIR / args.condition / args.domain
+    out_dir = Path(args.out_dir) if args.out_dir else CKPT_DIR / args.condition / args.domain
     out_dir.mkdir(parents=True, exist_ok=True)
 
     status_writer = StatusWriter(args.status_file)
