@@ -24,8 +24,11 @@ Usage:
 """
 
 import argparse
+import atexit
+import gc
 import json
 import logging
+import multiprocessing as mp
 import os
 import random
 import time
@@ -88,6 +91,45 @@ class StatusWriter:
         except Exception:
             # Never let status I/O interfere with training.
             pass
+
+
+def cleanup_runtime():
+    try:
+        children = mp.active_children()
+        for child in children:
+            try:
+                child.terminate()
+            except Exception:
+                pass
+        for child in children:
+            try:
+                child.join(timeout=1)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
+atexit.register(cleanup_runtime)
 
 
 class TrainStatusCallback(TrainerCallback):
@@ -485,6 +527,7 @@ def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
     def tokenize_fn(batch):
         all_input_ids = []
         all_labels    = []
+        all_lengths   = []
 
         for i in range(len(batch["instruction"])):
             prefix, response = format_prompt_parts({
@@ -517,8 +560,9 @@ def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
 
             all_input_ids.append(full_ids)
             all_labels.append(labels)
+            all_lengths.append(len(full_ids))
 
-        return {"input_ids": all_input_ids, "labels": all_labels}
+        return {"input_ids": all_input_ids, "labels": all_labels, "length": all_lengths}
 
     return raw_ds.map(tokenize_fn, batched=True, remove_columns=raw_ds.column_names)
 
@@ -666,7 +710,9 @@ def main():
         report_to                = "none",
         dataloader_num_workers   = 4,
         dataloader_pin_memory    = True,
-        remove_unused_columns    = False,
+        train_sampling_strategy  = "group_by_length",
+        length_column_name       = "length",
+        remove_unused_columns    = True,
     )
 
     # ── Trainer
@@ -698,43 +744,58 @@ def main():
     print(f"Reserved:  {torch.cuda.memory_reserved() / 1e9:.2f} GB")
     print("------------------")
 
-    print("Training...")
-    trainer.train()
+    try:
+        print("Training...")
+        trainer.train()
 
-    status_writer.emit({
-        "phase": "train",
-        "state": "saving",
-        "condition": args.condition,
-        "domain": args.domain,
-        "step": args.max_steps,
-        "total_steps": args.max_steps,
-        "it_s": 0.0,
-        "eta_s": 0.0,
-    })
+        status_writer.emit({
+            "phase": "train",
+            "state": "saving",
+            "condition": args.condition,
+            "domain": args.domain,
+            "step": args.max_steps,
+            "total_steps": args.max_steps,
+            "it_s": 0.0,
+            "eta_s": 0.0,
+        })
 
-    # ── EWC: compute and save Fisher state for next domain
-    if args.condition == "ewc":
-        print("[ewc] Computing Fisher matrix for next domain...")
-        new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
-        save_ewc_state(new_fisher, new_opt, out_dir)
+        # ── EWC: compute and save Fisher state for next domain
+        if args.condition == "ewc":
+            print("[ewc] Computing Fisher matrix for next domain...")
+            new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
+            save_ewc_state(new_fisher, new_opt, out_dir)
 
-    # ── Cleanup hooks before save
-    for h in hooks:
-        h.remove()
+        # ── Cleanup hooks before save
+        for h in hooks:
+            h.remove()
 
-    trainer.save_model(str(out_dir))
-    tokenizer.save_pretrained(str(out_dir))
-    status_writer.emit({
-        "phase": "train",
-        "state": "done",
-        "condition": args.condition,
-        "domain": args.domain,
-        "step": args.max_steps,
-        "total_steps": args.max_steps,
-        "it_s": 0.0,
-        "eta_s": 0.0,
-    })
-    print(f"\nDone. Checkpoint saved to {out_dir}")
+        trainer.save_model(str(out_dir))
+        tokenizer.save_pretrained(str(out_dir))
+        status_writer.emit({
+            "phase": "train",
+            "state": "done",
+            "condition": args.condition,
+            "domain": args.domain,
+            "step": args.max_steps,
+            "total_steps": args.max_steps,
+            "it_s": 0.0,
+            "eta_s": 0.0,
+        })
+        print(f"\nDone. Checkpoint saved to {out_dir}")
+    finally:
+        for h in hooks:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        try:
+            del trainer
+            del model
+            del tokenized
+            del collator
+        except Exception:
+            pass
+        cleanup_runtime()
 
 
 if __name__ == "__main__":
