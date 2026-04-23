@@ -426,7 +426,6 @@ def maybe_compile_model(model, enable_compile: bool):
             model,
             mode="max-autotune",
             backend="inductor",
-            options={},
         )
     except Exception as exc:
         print(f"[compile] WARNING: torch.compile failed ({type(exc).__name__}: {exc})")
