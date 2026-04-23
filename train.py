@@ -423,6 +423,7 @@ def maybe_compile_model(model, enable_compile: bool):
         from torch import _dynamo
 
         _dynamo.config.suppress_errors = True
+        _dynamo.config.capture_scalar_outputs = True
         return torch.compile(
             model,
             backend="inductor",
@@ -599,7 +600,7 @@ def main():
         dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
     )
 
     print("Amputating vision and audio encoders...")

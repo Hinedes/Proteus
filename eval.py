@@ -281,7 +281,7 @@ def main():
             dtype=torch.bfloat16,
             device_map="cuda",
             trust_remote_code=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation="sdpa",
         )
         model = PeftModel.from_pretrained(model, args.checkpoint)
     else:
@@ -290,7 +290,7 @@ def main():
             dtype=torch.bfloat16,
             device_map="cuda",
             trust_remote_code=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation="sdpa",
         )
         # Custom hook-based LoRA (train.py fast path) — re-wire if lora keys present
         apply_custom_lora(model, args.checkpoint)
