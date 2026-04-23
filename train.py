@@ -30,7 +30,6 @@ import os
 import random
 import time
 import warnings
-from copy import deepcopy
 from pathlib import Path
 
 # Silence noisy third-party warnings
@@ -41,9 +40,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 import torch
-import torch.nn.functional as F
 from datasets import Dataset
-from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -62,6 +59,13 @@ CKPT_DIR    = Path("checkpoints")
 CORE_HIDDEN = 1536
 CORE_MID    = 6144
 MAX_LENGTH  = 512
+
+
+def validate_args(args):
+    if not (0.0 <= args.replay_ratio < 1.0):
+        raise ValueError("--replay_ratio must satisfy 0.0 <= replay_ratio < 1.0.")
+    if args.ewc_samples <= 0:
+        raise ValueError("--ewc_samples must be > 0.")
 
 
 class StatusWriter:
@@ -168,7 +172,7 @@ def register_hooks(model):
 # ─────────────────────────────────────────────
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
-def compute_fisher(model, dataset, tokenizer, n_samples=200, batch_size=4):
+def compute_fisher(model, dataset, n_samples=200, batch_size=4):
     """
     Diagonal Fisher estimate via squared gradients on a sample of the dataset.
     Batched: processes batch_size samples per backward pass instead of 1.
@@ -201,6 +205,13 @@ def compute_fisher(model, dataset, tokenizer, n_samples=200, batch_size=4):
             if p.requires_grad and p.grad is not None:
                 fisher[n] += p.grad.detach() ** 2
         n_batches += 1
+
+    if n_batches == 0:
+        model.train()
+        raise RuntimeError(
+            "[ewc] Fisher estimation produced zero batches. "
+            "Ensure the dataset is non-empty and --ewc_samples > 0."
+        )
 
     for n in fisher:
         fisher[n] /= n_batches
@@ -238,7 +249,7 @@ class EWCTrainer(Trainer):
         self._built           = False
 
     def _build_pairs(self, model):
-        """Match fisher/opt to live model params. Store references, not copies."""
+        """Match fisher/opt to live model params and cache direct parameter refs."""
         pairs = []
         dev = next(model.parameters()).device
         param_dict = dict(model.named_parameters())
@@ -247,7 +258,8 @@ class EWCTrainer(Trainer):
             if n in param_dict:
                 f = self._fisher_dict[n].to(dev)
                 o = self._opt_params_dict[n].to(dev)
-                pairs.append((n, f, o))
+                p = param_dict[n]
+                pairs.append((p, f, o))
                 n_tracked += f.numel()
         self._ewc_pairs = pairs
         self._built = True
@@ -264,14 +276,162 @@ class EWCTrainer(Trainer):
             self._build_pairs(model)
 
         if self._ewc_pairs is not None:
-            param_dict = dict(model.named_parameters())
-            penalty = torch.tensor(0.0, device=loss.device)
-            for n, f, o in self._ewc_pairs:
-                p = param_dict[n]
+            penalty = loss.new_tensor(0.0)
+            for p, f, o in self._ewc_pairs:
                 penalty = penalty + (f * (p - o) ** 2).sum()
             loss = loss + (self.ewc_lambda / 2.0) * penalty
 
         return (loss, outputs) if return_outputs else loss
+
+
+def apply_proteus_attention_strategy(model, attention_mode: str):
+    attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+    layers = model.model.language_model.layers
+    n_layers = len(layers)
+
+    if attention_mode == "freeze":
+        # Condition 5a: freeze all attention across all layers
+        for layer in layers:
+            for name in attn_modules:
+                m = getattr(layer.self_attn, name, None)
+                if m is not None:
+                    m.weight.requires_grad_(False)
+        print(f"[proteus] Attention: all {n_layers} layers frozen (5a).")
+    elif attention_mode == "diagonal":
+        # Condition 5c: freeze bottom half, train top half
+        freeze_up_to = n_layers // 2
+        for i, layer in enumerate(layers):
+            for name in attn_modules:
+                m = getattr(layer.self_attn, name, None)
+                if m is not None:
+                    m.weight.requires_grad_(i >= freeze_up_to)
+        print(f"[proteus] Attention: layers 0-{freeze_up_to-1} frozen, {freeze_up_to}-{n_layers-1} trainable (5c).")
+    else:
+        print(f"[proteus] Attention: all {n_layers} layers trainable (5b).")
+
+
+def register_lora_fast_hooks(model, r=16, alpha=32, dropout_p=0.05):
+    """Register fast hook-based LoRA on q_proj/v_proj across all transformer layers."""
+    import math
+
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    lora_params = []
+    lora_hooks  = []
+    layers  = model.model.language_model.layers
+    scaling = alpha / r
+    _device = next(model.parameters()).device
+
+    for layer in layers:
+        for proj_name in ("q_proj", "v_proj"):
+            if not hasattr(layer.self_attn, proj_name):
+                continue
+
+            proj = getattr(layer.self_attn, proj_name)
+            inner = getattr(proj, "linear", proj)
+            in_f, out_f = inner.in_features, inner.out_features
+
+            lora_A = torch.nn.Parameter(
+                torch.empty(r, in_f, dtype=torch.bfloat16, device=_device)
+            )
+            lora_B = torch.nn.Parameter(
+                torch.zeros(out_f, r, dtype=torch.bfloat16, device=_device)
+            )
+            torch.nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
+
+            proj.register_parameter("lora_A", lora_A)
+            proj.register_parameter("lora_B", lora_B)
+            lora_params.extend([lora_A, lora_B])
+
+            drop = torch.nn.Dropout(dropout_p)
+
+            def make_hook(A, B, d):
+                def hook(module, input, output):
+                    x = input[0]
+                    delta = torch.nn.functional.linear(d(x), B @ A) * scaling
+                    return output + delta
+
+                return hook
+
+            lora_hooks.append(
+                proj.register_forward_hook(make_hook(lora_A, lora_B, drop))
+            )
+
+    return lora_hooks, lora_params
+
+
+def setup_proteus_condition(model, args):
+    model.train()
+    hooks = register_hooks(model)
+    apply_proteus_attention_strategy(model, args.attention)
+    return hooks, Trainer, None, None
+
+
+def setup_full_condition(model, args):
+    model.train()
+    print("[full] All parameters trainable.")
+    return [], Trainer, None, None
+
+
+def setup_lora_condition(model, args):
+    lora_hooks, lora_params = register_lora_fast_hooks(model)
+    trainable = sum(p.numel() for p in lora_params)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"[lora] Registered {len(lora_hooks)} forward hooks (fast path).")
+    print(f"[lora] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
+    return [], Trainer, None, None
+
+
+def setup_ewc_condition(model, args):
+    model.train()
+    fisher = None
+    opt_params = None
+    if args.ewc_state:
+        fisher, opt_params = load_ewc_state(args.ewc_state)
+        print(f"[ewc] lambda={args.ewc_lambda}, prior state loaded.")
+    else:
+        print("[ewc] No prior state — first domain, training without penalty.")
+    return [], EWCTrainer, fisher, opt_params
+
+
+def setup_replay_condition(model, args):
+    model.train()
+    if not args.replay_buffer:
+        print("[replay] WARNING: no --replay_buffer provided. Running as full fine-tune.")
+    print(f"[replay] ratio={args.replay_ratio}")
+    return [], Trainer, None, None
+
+
+def setup_training_condition(model, args):
+    handlers = {
+        "proteus": setup_proteus_condition,
+        "full": setup_full_condition,
+        "lora": setup_lora_condition,
+        "ewc": setup_ewc_condition,
+        "replay": setup_replay_condition,
+    }
+    return handlers[args.condition](model, args)
+
+
+def maybe_compile_model(model, enable_compile: bool):
+    if not enable_compile:
+        return model
+
+    print("Compiling model with Triton (CUDA graphs disabled)...")
+    try:
+        from torch import _dynamo
+
+        _dynamo.config.suppress_errors = True
+        return torch.compile(
+            model,
+            backend="inductor",
+            options={"triton.cudagraphs": False},
+        )
+    except Exception as exc:
+        print(f"[compile] WARNING: torch.compile failed ({type(exc).__name__}: {exc})")
+        print("[compile] WARNING: Falling back to eager mode.")
+        return model
 
 
 # ─────────────────────────────────────────────
@@ -293,22 +453,6 @@ def load_replay_buffer(path: str) -> list[dict]:
             records.append(json.loads(line))
     print(f"[replay] Loaded {len(records)} records from {path}")
     return records
-
-
-def format_prompt(row: dict) -> str:
-    instruction = row["instruction"]
-    inp         = row.get("input", "").strip()
-    output      = row["output"]
-    if inp:
-        return (
-            f"### Instruction:\n{instruction}\n\n"
-            f"### Input:\n{inp}\n\n"
-            f"### Response:\n{output}"
-        )
-    return (
-        f"### Instruction:\n{instruction}\n\n"
-        f"### Response:\n{output}"
-    )
 
 
 RESPONSE_KEY = "### Response:\n"
@@ -414,6 +558,10 @@ def main():
     parser.add_argument("--status_file",  type=str,   default=None,
                         help="Optional JSON status file path for live progress rendering.")
     args = parser.parse_args()
+    try:
+        validate_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     out_dir = CKPT_DIR / args.condition / args.domain
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -461,125 +609,13 @@ def main():
         del model.audio_encoder
     if hasattr(model, "multi_modal_projector"):
         del model.multi_modal_projector
+    torch.cuda.empty_cache()
 
     # ── Condition setup
-    hooks   = []
-    fisher  = None
-    opt_params = None
-    trainer_class = Trainer
+    hooks, trainer_class, fisher, opt_params = setup_training_condition(model, args)
 
-    if args.condition == "proteus":
-        model.train()
-        hooks = register_hooks(model)
-        # ── Attention strategy (Proteus only)
-        attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-        layers = model.model.language_model.layers
-        n_layers = len(layers)
-        if args.attention == "freeze":
-            # Condition 5a: freeze all attention across all layers
-            for layer in layers:
-                for name in attn_modules:
-                    m = getattr(layer.self_attn, name, None)
-                    if m is not None:
-                        m.weight.requires_grad_(False)
-            print(f"[proteus] Attention: all {n_layers} layers frozen (5a).")
-        elif args.attention == "diagonal":
-            # Condition 5c: freeze bottom half, train top half
-            freeze_up_to = n_layers // 2
-            for i, layer in enumerate(layers):
-                for name in attn_modules:
-                    m = getattr(layer.self_attn, name, None)
-                    if m is not None:
-                        m.weight.requires_grad_(i >= freeze_up_to)
-            print(f"[proteus] Attention: layers 0-{freeze_up_to-1} frozen, {freeze_up_to}-{n_layers-1} trainable (5c).")
-        else:
-            print(f"[proteus] Attention: all {n_layers} layers trainable (5b).")
-
-    elif args.condition == "full":
-        model.train()
-        print("[full] All parameters trainable.")
-
-    elif args.condition == "lora":
-        # Fast LoRA via forward hooks -- same pattern as Proteus gradient hooks.
-        # Avoids module-wrapping overhead. Caches merged BA so each hook is
-        # one fused matmul instead of two sequential ones.
-        import math
-
-        for p in model.parameters():
-            p.requires_grad_(False)
-
-        lora_params = []
-        lora_hooks  = []
-        layers  = model.model.language_model.layers
-        r, alpha, dropout_p = 16, 32, 0.05
-        scaling = alpha / r
-        _device = next(model.parameters()).device
-
-        for layer in layers:
-            for proj_name in ("q_proj", "v_proj"):
-                if not hasattr(layer.self_attn, proj_name):
-                    continue
-
-                proj = getattr(layer.self_attn, proj_name)
-                inner = getattr(proj, "linear", proj)
-                in_f, out_f = inner.in_features, inner.out_features
-
-                lora_A = torch.nn.Parameter(
-                    torch.empty(r, in_f, dtype=torch.bfloat16, device=_device)
-                )
-                lora_B = torch.nn.Parameter(
-                    torch.zeros(out_f, r, dtype=torch.bfloat16, device=_device)
-                )
-                torch.nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
-
-                proj.register_parameter("lora_A", lora_A)
-                proj.register_parameter("lora_B", lora_B)
-                lora_params.extend([lora_A, lora_B])
-
-                drop = torch.nn.Dropout(dropout_p)
-
-                def make_hook(A, B, d):
-                    def hook(module, input, output):
-                        x = input[0]
-                        delta = torch.nn.functional.linear(d(x), B @ A) * scaling
-                        return output + delta
-
-                    return hook
-
-                lora_hooks.append(
-                    proj.register_forward_hook(make_hook(lora_A, lora_B, drop))
-                )
-
-        trainable = sum(p.numel() for p in lora_params)
-        total     = sum(p.numel() for p in model.parameters())
-        print(f"[lora] Registered {len(lora_hooks)} forward hooks (fast path).")
-        print(f"[lora] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
-
-    elif args.condition == "ewc":
-        model.train()
-        trainer_class = EWCTrainer
-        if args.ewc_state:
-            fisher, opt_params = load_ewc_state(args.ewc_state)
-            print(f"[ewc] lambda={args.ewc_lambda}, prior state loaded.")
-        else:
-            print("[ewc] No prior state — first domain, training without penalty.")
-
-    elif args.condition == "replay":
-        model.train()
-        if not args.replay_buffer:
-            print("[replay] WARNING: no --replay_buffer provided. Running as full fine-tune.")
-        print(f"[replay] ratio={args.replay_ratio}")
-
-    # ── Triton compile — Fixed for ROCm 7.0
-    if args.compile:
-        print("Compiling model with Triton (CUDA graphs disabled)...")
-        from torch import _dynamo
-        _dynamo.config.suppress_errors = True
-        model = torch.compile(
-            model,
-            backend="inductor",
-            options={"triton.cudagraphs": False},
-        )
+    # ── Optional Triton compile
+    model = maybe_compile_model(model, args.compile)
 
     # ── Dataset
     print(f"Loading {args.domain} dataset...")
@@ -613,6 +649,7 @@ def main():
         max_steps                = args.max_steps,
         per_device_train_batch_size = args.batch_size,
         gradient_accumulation_steps = args.grad_accum,
+        gradient_checkpointing   = False,
         learning_rate            = args.lr,
         lr_scheduler_type        = "cosine",
         warmup_steps             = 25,
@@ -667,7 +704,7 @@ def main():
     # ── EWC: compute and save Fisher state for next domain
     if args.condition == "ewc":
         print("[ewc] Computing Fisher matrix for next domain...")
-        new_fisher, new_opt = compute_fisher(model, tokenized, tokenizer, n_samples=args.ewc_samples)
+        new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
         save_ewc_state(new_fisher, new_opt, out_dir)
 
     # ── Cleanup hooks before save
