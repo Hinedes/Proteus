@@ -126,7 +126,7 @@ run_train() {
     set_step "train/$condition/$domain"
     log "START $CURRENT_STEP $*"
     python train.py --domain "$domain" --condition "$condition" \
-        --max_steps "$STEPS" --batch_size 8 --grad_accum 2 --compile "$@" 2>&1 | tee -a "$LOG"
+        --max_steps "$STEPS" --batch_size 16 --grad_accum 1 --compile "$@" 2>&1 | tee -a "$LOG"
     log "DONE  $CURRENT_STEP"
 }
 

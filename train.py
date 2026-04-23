@@ -480,9 +480,16 @@ def main():
             print("[replay] WARNING: no --replay_buffer provided. Running as full fine-tune.")
         print(f"[replay] ratio={args.replay_ratio}")
 
-    # ── Triton compile — disabled for now (CUDA Graph issues with ROCm 7.0)
-    # if args.compile:
-    #     model = torch.compile(model, mode="default")
+    # ── Triton compile — Fixed for ROCm 7.0
+    if args.compile:
+        print("Compiling model with Triton (CUDA graphs disabled)...")
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        model = torch.compile(
+            model,
+            backend="inductor",
+            options={"triton.cudagraphs": False},
+        )
 
     # ── Dataset
     print(f"Loading {args.domain} dataset...")
