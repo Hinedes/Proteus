@@ -352,8 +352,6 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── Model
-    # sdpa: PyTorch built-in fused attention, no head dim restriction, Blackwell-compatible.
-    # flash_attention_2 excluded: Gemma 4 has head_dim > 256, FA2 hard limit.
     _model_source = args.start_from if args.start_from else MODEL_ID
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
@@ -361,8 +359,18 @@ def main():
         dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
-        attn_implementation="sdpa",
+        attn_implementation="flash_attention_2",
     )
+
+    print("Amputating vision and audio encoders...")
+    if hasattr(model, "vision_tower"):
+        del model.vision_tower
+    if hasattr(model, "audio_encoder"):
+        del model.audio_encoder
+    if hasattr(model, "multi_modal_projector"):
+        del model.multi_modal_projector
+
+    torch.cuda.empty_cache()
 
     # ── Condition setup
     hooks   = []
