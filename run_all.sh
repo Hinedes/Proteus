@@ -1,8 +1,19 @@
 #!/bin/bash
 chmod +x "$0"
-# Proteus — 4-Domain Sequential Chain Runner
-# Runs Proteus vs Full fine-tune across medical → legal → code → multilingual.
-# Single-domain baselines (LoRA, EWC, Replay) are already complete.
+# Proteus — Full Experimental Runner
+#
+# Section 1: Extended Medical→Legal (4000 steps, 2 conditions)
+#   Stress-tests forgetting harder. Widens Table 2 gap.
+#   Saves to checkpoints/{condition}_4k/ — does NOT touch canonical checkpoints.
+#
+# Section 2: Canonical 4-domain sequential chains (2000 steps, 2 conditions)
+#   Single clean run for both Proteus and Full. Fixes Table 3 chimera.
+#   Saves to checkpoints/{condition}_canon/ — isolated from prior runs.
+#
+# Section 3: Attention sweeps (2000 steps, 2 variants, 4 domains each)
+#   5a: --attention freeze   → proteus_attn_freeze
+#   5c: --attention diagonal → proteus_attn_diagonal
+#   Sequential chains, start from base model.
 #
 # Usage:
 #   ./run_all.sh YOUR_NTFY_TOPIC
@@ -10,6 +21,7 @@ chmod +x "$0"
 NTFY_TOPIC="${1:-proteus-aman-2026}"
 LOG="results/run_all.log"
 STEPS=2000
+LONG_STEPS=4000
 N_EVAL=100
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_VERBOSITY=error
@@ -22,9 +34,6 @@ mkdir -p results
 
 set -eo pipefail
 
-# ─────────────────────────────────────────────
-# Logging + notifications
-# ─────────────────────────────────────────────
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
 }
@@ -55,9 +64,6 @@ credit_used() {
     printf "\$%.2f" "$(awk "BEGIN {printf \"%.2f\", $secs / 3600 * $RATE}")"
 }
 
-# ─────────────────────────────────────────────
-# Failure handler
-# ─────────────────────────────────────────────
 STEP_FILE="results/.current_step"
 STATUS_FILE="results/.live_status.json"
 CURRENT_STEP="unknown"
@@ -80,95 +86,48 @@ last_clean_log() {
 
 format_status_line() {
     python3 - "$STATUS_FILE" <<'PY'
-import json
-import math
-import sys
+import json, math, sys
 from pathlib import Path
-
 path = Path(sys.argv[1])
 try:
     data = json.loads(path.read_text(encoding="utf-8"))
 except Exception:
-    print("", end="")
-    raise SystemExit(0)
-
-def fmt_eta(seconds):
-    if seconds is None:
-        return "--:--"
-    try:
-        secs = int(max(0, float(seconds)))
-    except Exception:
-        return "--:--"
-    mins, sec = divmod(secs, 60)
-    hrs, mins = divmod(mins, 60)
-    if hrs:
-        return f"{hrs:02d}:{mins:02d}:{sec:02d}"
-    return f"{mins:02d}:{sec:02d}"
-
-phase = data.get("phase")
-state = str(data.get("state", ""))
-
+    print("", end=""); raise SystemExit(0)
+def fmt_eta(s):
+    if s is None: return "--:--"
+    try: secs = int(max(0, float(s)))
+    except: return "--:--"
+    m, s = divmod(secs, 60); h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+phase = data.get("phase"); state = str(data.get("state",""))
 if phase == "train":
-    step = int(data.get("step", 0) or 0)
-    total = int(data.get("total_steps", 0) or 0)
-    pct = (100.0 * step / total) if total > 0 else 0.0
-    it_s = float(data.get("it_s", 0.0) or 0.0)
-    eta = fmt_eta(data.get("eta_s"))
+    step = int(data.get("step",0) or 0); total = int(data.get("total_steps",0) or 0)
+    pct = (100.0*step/total) if total>0 else 0.0
+    it_s = float(data.get("it_s",0.0) or 0.0); eta = fmt_eta(data.get("eta_s"))
     loss = data.get("loss")
-    if isinstance(loss, (int, float)) and math.isfinite(float(loss)):
-        loss_txt = f"{float(loss):.4f}"
-    else:
-        loss_txt = "--"
-    condition = str(data.get("condition", "?"))
-    domain = str(data.get("domain", "?"))
-    print(
-        f"[train {condition}/{domain}] {step}/{total} ({pct:5.1f}%) "
-        f"| {it_s:6.2f} it/s | eta {eta} | loss {loss_txt} | {state}",
-        end="",
-    )
+    loss_txt = f"{float(loss):.4f}" if isinstance(loss,(int,float)) and math.isfinite(float(loss)) else "--"
+    print(f"[train {data.get('condition','?')}/{data.get('domain','?')}] {step}/{total} ({pct:5.1f}%) | {it_s:6.2f} it/s | eta {eta} | loss {loss_txt} | {state}", end="")
 elif phase == "eval":
-    domain = str(data.get("domain", "?"))
-    domain_index = int(data.get("domain_index", 0) or 0)
-    domains_total = int(data.get("domains_total", 0) or 0)
-    sample = int(data.get("sample", 0) or 0)
-    sample_total = int(data.get("sample_total", 0) or 0)
-    overall_step = int(data.get("overall_step", 0) or 0)
-    overall_total = int(data.get("overall_total", 0) or 0)
-    pct = (100.0 * overall_step / overall_total) if overall_total > 0 else 0.0
-    it_s = float(data.get("it_s", 0.0) or 0.0)
+    os_= int(data.get("overall_step",0) or 0); ot = int(data.get("overall_total",0) or 0)
+    pct = (100.0*os_/ot) if ot>0 else 0.0; it_s = float(data.get("it_s",0.0) or 0.0)
     ppl = data.get("ppl_so_far")
-    if isinstance(ppl, (int, float)) and math.isfinite(float(ppl)):
-        ppl_txt = f"{float(ppl):.3f}"
-    else:
-        ppl_txt = "--"
-    print(
-        f"[eval {domain_index}/{domains_total} {domain}] sample {sample}/{sample_total} "
-        f"| overall {overall_step}/{overall_total} ({pct:5.1f}%) "
-        f"| {it_s:6.2f} it/s | ppl~ {ppl_txt} | {state}",
-        end="",
-    )
+    ppl_txt = f"{float(ppl):.3f}" if isinstance(ppl,(int,float)) and math.isfinite(float(ppl)) else "--"
+    print(f"[eval {data.get('domain_index','?')}/{data.get('domains_total','?')} {data.get('domain','?')}] {os_}/{ot} ({pct:5.1f}%) | {it_s:6.2f} it/s | ppl~ {ppl_txt} | {state}", end="")
 else:
     print("", end="")
 PY
 }
 
 start_status_renderer() {
-    if [[ ! -t 2 ]]; then
-        return
-    fi
-    rm -f "$STATUS_FILE"
-    : > "$STATUS_FILE"
-    (
-        while true; do
-            if [[ -s "$STATUS_FILE" ]]; then
-                line=$(format_status_line)
-                if [[ -n "$line" ]]; then
-                    printf "\r\033[2K%s" "$line" >&2
-                fi
-            fi
-            sleep 1
-        done
-    ) &
+    [[ ! -t 2 ]] && return
+    rm -f "$STATUS_FILE"; : > "$STATUS_FILE"
+    ( while true; do
+        if [[ -s "$STATUS_FILE" ]]; then
+            line=$(format_status_line)
+            [[ -n "$line" ]] && printf "\r\033[2K%s" "$line" >&2
+        fi
+        sleep 1
+    done ) &
     STATUS_RENDER_PID=$!
 }
 
@@ -178,47 +137,33 @@ stop_status_renderer() {
         wait "$STATUS_RENDER_PID" 2>/dev/null || true
         STATUS_RENDER_PID=""
     fi
-    if [[ -t 2 ]]; then
-        printf "\r\033[2K" >&2
-    fi
+    [[ -t 2 ]] && printf "\r\033[2K" >&2
     rm -f "$STATUS_FILE"
 }
 
 on_error() {
-    local exit_code=$?
-    local line=$1
-    local step
+    local exit_code=$? line=$1 step
     step=$(get_step)
     stop_status_renderer
     log "CRASH at line $line (exit $exit_code) during: $step"
-    local tail_log
-    tail_log=$(last_clean_log)
     notify "Proteus CRASHED" \
 "Step: $step
-Exit: $exit_code
-Elapsed: $(elapsed_str) | Spent: $(credit_used)
-
-Last: $tail_log
-
-Resume manually from failed step." \
-        "urgent" "rotating_light"
+Exit: $exit_code | Elapsed: $(elapsed_str) | Spent: $(credit_used)
+Last: $(last_clean_log)
+Resume manually from failed step." "urgent" "rotating_light"
     kill "${HEARTBEAT_PID:-}" 2>/dev/null || true
     exit $exit_code
 }
 
 trap 'on_error $LINENO' ERR
 
-# ─────────────────────────────────────────────
-# Heartbeat (every 30 min)
-# ─────────────────────────────────────────────
 heartbeat() {
     while true; do
         sleep 1800
         notify "Proteus heartbeat" \
 "Step: $(get_step)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)
-Last: $(last_clean_log)" \
-            "low"
+Last: $(last_clean_log)" "low"
     done
 }
 
@@ -231,21 +176,21 @@ trap 'stop_status_renderer; kill ${HEARTBEAT_PID:-} 2>/dev/null' EXIT
 # Helpers
 # ─────────────────────────────────────────────
 run_train() {
-    local domain="$1"
-    local condition="$2"
-    shift 2
+    # run_train <domain> <condition> <out_dir> [extra args...]
+    local domain="$1" condition="$2" out_dir="$3"
+    shift 3
     set_step "train/$condition/$domain"
-    log "START $CURRENT_STEP $*"
+    log "START $CURRENT_STEP -> $out_dir $*"
     start_status_renderer
     python train.py --domain "$domain" --condition "$condition" \
-        --max_steps "$STEPS" --batch_size 16 --grad_accum 1 --status_file "$STATUS_FILE" "$@" 2>&1 | tee -a "$LOG"
+        --out_dir "$out_dir" \
+        --batch_size 16 --grad_accum 1 --status_file "$STATUS_FILE" "$@" 2>&1 | tee -a "$LOG"
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
 }
 
 run_eval() {
-    local checkpoint="$1"
-    local label="$2"
+    local checkpoint="$1" label="$2"
     set_step "eval/$label"
     log "START $CURRENT_STEP"
     start_status_renderer
@@ -267,85 +212,153 @@ else:
         if not line.strip(): continue
         e = json.loads(line)
         d = e.get("domains", {})
-        med = d.get("medical", "?")
-        leg = d.get("legal", "?")
-        cod = d.get("code", "?")
-        mul = d.get("multilingual", "?")
-        print(f"{e['label']}: med={med} leg={leg} cod={cod} mul={mul}")
+        print(f"{e['label']}: med={d.get('medical','?')} leg={d.get('legal','?')} cod={d.get('code','?')} mul={d.get('multilingual','?')}")
 EOF
 }
 
 # ─────────────────────────────────────────────
-# Start
-# ─────────────────────────────────────────────
 log "=============================="
-log "Proteus 4-domain sequential chains"
+log "Proteus full experimental run"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
-notify "Proteus 4-domain chains started" \
-"Chains: Proteus, Full
-4 domains × 500 steps × 2 conditions = 4000 steps total
-Topic: $NTFY_TOPIC" \
-    "default" "rocket"
+notify "Proteus full run started" \
+"Sections: Extended 4k | Canonical chains | Attention sweeps
+Topic: $NTFY_TOPIC" "default" "rocket"
 
-# ─────────────────────────────────────────────
-# 4-Domain Sequential Chain — Proteus
-# ─────────────────────────────────────────────
-log "--- CHAIN: proteus (medical → legal → code → multilingual) ---"
 
-run_train medical proteus
-run_eval  checkpoints/proteus/medical proteus_seq_after_medical
+# ══════════════════════════════════════════════
+# SECTION 1: Extended Medical→Legal (4000 steps)
+# ══════════════════════════════════════════════
+log "=============================="
+log "SECTION 1: Extended 4k Medical→Legal"
+log "=============================="
 
-run_train legal   proteus --start_from checkpoints/proteus/medical
-run_eval  checkpoints/proteus/legal   proteus_seq_after_legal
+run_train medical full     checkpoints/full_4k/medical    --max_steps "$LONG_STEPS"
+run_eval  checkpoints/full_4k/medical    full_4k_after_medical
 
-run_train code    proteus --start_from checkpoints/proteus/legal
-run_eval  checkpoints/proteus/code    proteus_seq_after_code
+run_train legal   full     checkpoints/full_4k/legal      --max_steps "$LONG_STEPS" \
+    --start_from checkpoints/full_4k/medical
+run_eval  checkpoints/full_4k/legal      full_4k_after_legal
 
-run_train multilingual proteus --start_from checkpoints/proteus/code
-run_eval  checkpoints/proteus/multilingual proteus_seq_after_multilingual
+run_train medical proteus  checkpoints/proteus_4k/medical --max_steps "$LONG_STEPS"
+run_eval  checkpoints/proteus_4k/medical proteus_4k_after_medical
 
-notify "Proteus chain done" \
+run_train legal   proteus  checkpoints/proteus_4k/legal   --max_steps "$LONG_STEPS" \
+    --start_from checkpoints/proteus_4k/medical
+run_eval  checkpoints/proteus_4k/legal   proteus_4k_after_legal
+
+notify "Section 1 done: Extended 4k" \
 "$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
-    "default" "white_check_mark"
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
-# ─────────────────────────────────────────────
-# 4-Domain Sequential Chain — Full
-# ─────────────────────────────────────────────
-log "--- CHAIN: full (medical → legal → code → multilingual) ---"
 
-run_train medical full
-run_eval  checkpoints/full/medical full_seq_after_medical
+# ══════════════════════════════════════════════
+# SECTION 2: Canonical 4-domain sequential chains
+# ══════════════════════════════════════════════
+log "=============================="
+log "SECTION 2: Canonical 4-domain chains (2000 steps)"
+log "=============================="
 
-run_train legal   full --start_from checkpoints/full/medical
-run_eval  checkpoints/full/legal   full_seq_after_legal
+log "--- CHAIN: proteus_canon ---"
+run_train medical    proteus checkpoints/proteus_canon/medical       --max_steps "$STEPS"
+run_eval  checkpoints/proteus_canon/medical       proteus_canon_after_medical
 
-run_train code    full --start_from checkpoints/full/legal
-run_eval  checkpoints/full/code    full_seq_after_code
+run_train legal      proteus checkpoints/proteus_canon/legal         --max_steps "$STEPS" \
+    --start_from checkpoints/proteus_canon/medical
+run_eval  checkpoints/proteus_canon/legal         proteus_canon_after_legal
 
-run_train multilingual full --start_from checkpoints/full/code
-run_eval  checkpoints/full/multilingual full_seq_after_multilingual
+run_train code       proteus checkpoints/proteus_canon/code          --max_steps "$STEPS" \
+    --start_from checkpoints/proteus_canon/legal
+run_eval  checkpoints/proteus_canon/code          proteus_canon_after_code
 
-notify "Full chain done" \
+run_train multilingual proteus checkpoints/proteus_canon/multilingual --max_steps "$STEPS" \
+    --start_from checkpoints/proteus_canon/code
+run_eval  checkpoints/proteus_canon/multilingual  proteus_canon_after_multilingual
+
+notify "Proteus canonical chain done" \
 "$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" \
-    "default" "white_check_mark"
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
-# ─────────────────────────────────────────────
-# Done
+log "--- CHAIN: full_canon ---"
+run_train medical    full checkpoints/full_canon/medical       --max_steps "$STEPS"
+run_eval  checkpoints/full_canon/medical       full_canon_after_medical
+
+run_train legal      full checkpoints/full_canon/legal         --max_steps "$STEPS" \
+    --start_from checkpoints/full_canon/medical
+run_eval  checkpoints/full_canon/legal         full_canon_after_legal
+
+run_train code       full checkpoints/full_canon/code          --max_steps "$STEPS" \
+    --start_from checkpoints/full_canon/legal
+run_eval  checkpoints/full_canon/code          full_canon_after_code
+
+run_train multilingual full checkpoints/full_canon/multilingual --max_steps "$STEPS" \
+    --start_from checkpoints/full_canon/code
+run_eval  checkpoints/full_canon/multilingual  full_canon_after_multilingual
+
+notify "Section 2 done: Canonical chains" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+
+
+# ══════════════════════════════════════════════
+# SECTION 3: Attention sweeps (5a and 5c)
+# ══════════════════════════════════════════════
+log "=============================="
+log "SECTION 3: Attention sweeps"
+log "=============================="
+
+log "--- CHAIN: proteus_attn_freeze (5a) ---"
+run_train medical    proteus checkpoints/proteus_attn_freeze/medical       --max_steps "$STEPS" --attention freeze
+run_eval  checkpoints/proteus_attn_freeze/medical       proteus_freeze_after_medical
+
+run_train legal      proteus checkpoints/proteus_attn_freeze/legal         --max_steps "$STEPS" --attention freeze \
+    --start_from checkpoints/proteus_attn_freeze/medical
+run_eval  checkpoints/proteus_attn_freeze/legal         proteus_freeze_after_legal
+
+run_train code       proteus checkpoints/proteus_attn_freeze/code          --max_steps "$STEPS" --attention freeze \
+    --start_from checkpoints/proteus_attn_freeze/legal
+run_eval  checkpoints/proteus_attn_freeze/code          proteus_freeze_after_code
+
+run_train multilingual proteus checkpoints/proteus_attn_freeze/multilingual --max_steps "$STEPS" --attention freeze \
+    --start_from checkpoints/proteus_attn_freeze/code
+run_eval  checkpoints/proteus_attn_freeze/multilingual  proteus_freeze_after_multilingual
+
+notify "5a done: attn_freeze" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+
+log "--- CHAIN: proteus_attn_diagonal (5c) ---"
+run_train medical    proteus checkpoints/proteus_attn_diagonal/medical       --max_steps "$STEPS" --attention diagonal
+run_eval  checkpoints/proteus_attn_diagonal/medical       proteus_diagonal_after_medical
+
+run_train legal      proteus checkpoints/proteus_attn_diagonal/legal         --max_steps "$STEPS" --attention diagonal \
+    --start_from checkpoints/proteus_attn_diagonal/medical
+run_eval  checkpoints/proteus_attn_diagonal/legal         proteus_diagonal_after_legal
+
+run_train code       proteus checkpoints/proteus_attn_diagonal/code          --max_steps "$STEPS" --attention diagonal \
+    --start_from checkpoints/proteus_attn_diagonal/legal
+run_eval  checkpoints/proteus_attn_diagonal/code          proteus_diagonal_after_code
+
+run_train multilingual proteus checkpoints/proteus_attn_diagonal/multilingual --max_steps "$STEPS" --attention diagonal \
+    --start_from checkpoints/proteus_attn_diagonal/code
+run_eval  checkpoints/proteus_attn_diagonal/multilingual  proteus_diagonal_after_multilingual
+
+notify "Section 3 done: Attention sweeps" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+
+
 # ─────────────────────────────────────────────
 log "=============================="
-log "All chains complete."
+log "All sections complete."
 log "Elapsed: $(elapsed_str) | Total spend: $(credit_used)"
 log "=============================="
 
 notify "Proteus COMPLETE" \
-"Both 4-domain chains done!
+"All 3 sections done.
 Elapsed: $(elapsed_str) | Total: $(credit_used)
 
-$(eval_summary)" \
-    "high" "checkered_flag"
+$(eval_summary)" "high" "checkered_flag"
 
 log "Done."
