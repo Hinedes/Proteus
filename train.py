@@ -462,8 +462,6 @@ def main():
     if hasattr(model, "multi_modal_projector"):
         del model.multi_modal_projector
 
-    torch.cuda.empty_cache()
-
     # ── Condition setup
     hooks   = []
     fisher  = None
