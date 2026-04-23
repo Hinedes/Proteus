@@ -46,4 +46,5 @@ venv/
 ENV/
 env/
 *.env  
-proteus_results_backup/
+proteus_results/
+*.tex
