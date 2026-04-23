@@ -7,7 +7,7 @@ chmod +x "$0"
 # Usage:
 #   ./run_all.sh YOUR_NTFY_TOPIC
 
-NTFY_TOPIC="${1:-proteus-notify}"
+NTFY_TOPIC="${1:-proteus-aman-2026}"
 LOG="results/run_all.log"
 STEPS=2000
 N_EVAL=100
@@ -34,13 +34,15 @@ notify() {
     local message="$2"
     local priority="${3:-default}"
     local tags="${4:-}"
-    curl -s \
+    if ! curl -fsS --connect-timeout 10 --max-time 20 \
         -H "Title: $title" \
         -H "Priority: $priority" \
         -H "Markdown: yes" \
         ${tags:+-H "Tags: $tags"} \
         --data-raw "$message" \
-        "https://ntfy.sh/$NTFY_TOPIC" > /dev/null || true
+        "https://ntfy.sh/$NTFY_TOPIC" > /dev/null; then
+        log "[notify] WARNING: failed to send to topic '$NTFY_TOPIC' (title: $title)"
+    fi
 }
 
 elapsed_str() {
