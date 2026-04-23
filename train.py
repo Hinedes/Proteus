@@ -152,12 +152,11 @@ def register_hooks(model):
 
     def make_hook(proj_type):
         def hook(grad):
-            g = grad.clone()
             if proj_type in ("gate", "up"):
-                g[:CORE_MID, :CORE_HIDDEN] = 0.0
+                grad[:CORE_MID, :CORE_HIDDEN] = 0.0
             else:
-                g[:CORE_HIDDEN, :CORE_MID] = 0.0
-            return g
+                grad[:CORE_HIDDEN, :CORE_MID] = 0.0
+            return grad
         return hook
 
     for layer in layers:
@@ -650,7 +649,7 @@ def main():
         max_steps                = args.max_steps,
         per_device_train_batch_size = args.batch_size,
         gradient_accumulation_steps = args.grad_accum,
-        gradient_checkpointing   = False,
+        gradient_checkpointing   = True,
         learning_rate            = args.lr,
         lr_scheduler_type        = "cosine",
         warmup_steps             = 25,
