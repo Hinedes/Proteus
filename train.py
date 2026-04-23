@@ -422,11 +422,11 @@ def maybe_compile_model(model, enable_compile: bool):
         from torch import _dynamo
 
         _dynamo.config.suppress_errors = True
-        _dynamo.config.capture_scalar_outputs = True
         return torch.compile(
             model,
+            mode="max-autotune",
             backend="inductor",
-            options={"triton.cudagraphs": False},
+            options={},
         )
     except Exception as exc:
         print(f"[compile] WARNING: torch.compile failed ({type(exc).__name__}: {exc})")
@@ -596,7 +596,7 @@ def main():
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         _model_source,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="cuda",
         trust_remote_code=True,
         attn_implementation="sdpa",
@@ -649,7 +649,7 @@ def main():
         max_steps                = args.max_steps,
         per_device_train_batch_size = args.batch_size,
         gradient_accumulation_steps = args.grad_accum,
-        gradient_checkpointing   = True,
+        gradient_checkpointing   = False,
         learning_rate            = args.lr,
         lr_scheduler_type        = "cosine",
         warmup_steps             = 25,
