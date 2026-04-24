@@ -327,9 +327,9 @@ log "=============================="
 # "$(eval_summary)
 # Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
-#log "--- CHAIN: ewc_canon ---"
-# run_train medical    ewc checkpoints/ewc_canon/medical       --max_steps "$STEPS"
-#run_eval  checkpoints/ewc_canon/medical       ewc_canon_after_medical
+log "--- CHAIN: ewc_canon ---"
+ run_train medical    ewc checkpoints/ewc_canon/medical       --max_steps "$STEPS"
+run_eval  checkpoints/ewc_canon/medical       ewc_canon_after_medical
 
 run_train legal      ewc checkpoints/ewc_canon/legal         --max_steps "$STEPS" \
     --start_from checkpoints/ewc_canon/medical \
