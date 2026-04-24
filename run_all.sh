@@ -27,6 +27,14 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
 export PYTHONWARNINGS="ignore::UserWarning"
+
+# ── TunableOp: GEMM kernel tuning for MI300X ──────────────────────────────────
+# One-time tuning pass selects the fastest hipBLASLt/rocBLAS kernel per GEMM
+# shape. CSV is reused by all subsequent runs at zero overhead.
+# Expected gain: 5-22% throughput improvement on LLM workloads.
+TUNABLEOP_CSV="results/tunableop_results.csv"
+export PYTORCH_TUNABLEOP_ENABLED=1
+export PYTORCH_TUNABLEOP_FILENAME="$TUNABLEOP_CSV"
 START_TIME=$(date +%s)
 RATE=1.99   # USD/hr for MI300X
 
@@ -222,6 +230,21 @@ log "Proteus full experimental run"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
+# ── TunableOp: one-time tuning pass ───────────────────────────────────────────
+if [[ ! -f "$TUNABLEOP_CSV" ]]; then
+    log "TunableOp: no CSV found — running one-time tuning pass (100 steps)..."
+    export PYTORCH_TUNABLEOP_TUNING=1
+    python train.py --domain medical --condition proteus \
+        --max_steps 100 --batch_size 16 --grad_accum 1 \
+        --out_dir /tmp/tunableop_warmup 2>&1 | tee -a "$LOG"
+    export PYTORCH_TUNABLEOP_TUNING=0
+    log "TunableOp: tuning complete. CSV at $TUNABLEOP_CSV — active for all runs."
+else
+    log "TunableOp: CSV found — tuning skipped, kernels pre-loaded."
+    export PYTORCH_TUNABLEOP_TUNING=0
+fi
+# ──────────────────────────────────────────────────────────────────────────────
+
 notify "Proteus full run started" \
 "Sections: Extended 4k | Canonical chains | Attention sweeps
 Topic: $NTFY_TOPIC" "default" "rocket"
@@ -295,6 +318,74 @@ run_eval  checkpoints/full_canon/code          full_canon_after_code
 run_train multilingual full checkpoints/full_canon/multilingual --max_steps "$STEPS" \
     --start_from checkpoints/full_canon/code
 run_eval  checkpoints/full_canon/multilingual  full_canon_after_multilingual
+
+log "--- CHAIN: lora_canon ---"
+run_train medical    lora checkpoints/lora_canon/medical       --max_steps "$STEPS"
+run_eval  checkpoints/lora_canon/medical       lora_canon_after_medical
+
+run_train legal      lora checkpoints/lora_canon/legal         --max_steps "$STEPS" \
+    --start_from checkpoints/lora_canon/medical
+run_eval  checkpoints/lora_canon/legal         lora_canon_after_legal
+
+run_train code       lora checkpoints/lora_canon/code          --max_steps "$STEPS" \
+    --start_from checkpoints/lora_canon/legal
+run_eval  checkpoints/lora_canon/code          lora_canon_after_code
+
+run_train multilingual lora checkpoints/lora_canon/multilingual --max_steps "$STEPS" \
+    --start_from checkpoints/lora_canon/code
+run_eval  checkpoints/lora_canon/multilingual  lora_canon_after_multilingual
+
+notify "LoRA canonical chain done" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+
+log "--- CHAIN: ewc_canon ---"
+run_train medical    ewc checkpoints/ewc_canon/medical       --max_steps "$STEPS"
+run_eval  checkpoints/ewc_canon/medical       ewc_canon_after_medical
+
+run_train legal      ewc checkpoints/ewc_canon/legal         --max_steps "$STEPS" \
+    --start_from checkpoints/ewc_canon/medical \
+    --ewc_state checkpoints/ewc_canon/medical/fisher.pt
+run_eval  checkpoints/ewc_canon/legal         ewc_canon_after_legal
+
+run_train code       ewc checkpoints/ewc_canon/code          --max_steps "$STEPS" \
+    --start_from checkpoints/ewc_canon/legal \
+    --ewc_state checkpoints/ewc_canon/legal/fisher.pt
+run_eval  checkpoints/ewc_canon/code          ewc_canon_after_code
+
+run_train multilingual ewc checkpoints/ewc_canon/multilingual --max_steps "$STEPS" \
+    --start_from checkpoints/ewc_canon/code \
+    --ewc_state checkpoints/ewc_canon/code/fisher.pt
+run_eval  checkpoints/ewc_canon/multilingual  ewc_canon_after_multilingual
+
+notify "EWC canonical chain done" \
+"$(eval_summary)
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+
+log "--- CHAIN: replay_canon ---"
+run_train medical    replay checkpoints/replay_canon/medical       --max_steps "$STEPS"
+run_eval  checkpoints/replay_canon/medical       replay_canon_after_medical
+log "Building replay buffer from medical..."
+python build_replay_buffer.py --domain medical 2>&1 | tee -a "$LOG"
+
+run_train legal      replay checkpoints/replay_canon/legal         --max_steps "$STEPS" \
+    --start_from checkpoints/replay_canon/medical \
+    --replay_buffer data/replay_buffer.jsonl
+run_eval  checkpoints/replay_canon/legal         replay_canon_after_legal
+log "Building replay buffer: appending legal..."
+python build_replay_buffer.py --domain legal 2>&1 | tee -a "$LOG"
+
+run_train code       replay checkpoints/replay_canon/code          --max_steps "$STEPS" \
+    --start_from checkpoints/replay_canon/legal \
+    --replay_buffer data/replay_buffer.jsonl
+run_eval  checkpoints/replay_canon/code          replay_canon_after_code
+log "Building replay buffer: appending code..."
+python build_replay_buffer.py --domain code 2>&1 | tee -a "$LOG"
+
+run_train multilingual replay checkpoints/replay_canon/multilingual --max_steps "$STEPS" \
+    --start_from checkpoints/replay_canon/code \
+    --replay_buffer data/replay_buffer.jsonl
+run_eval  checkpoints/replay_canon/multilingual  replay_canon_after_multilingual
 
 notify "Section 2 done: Canonical chains" \
 "$(eval_summary)
