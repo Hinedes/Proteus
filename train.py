@@ -341,15 +341,14 @@ class EWCTrainer(Trainer):
         loss    = outputs.loss
 
         if hasattr(self, "ewc_fisher") and self.ewc_fisher is not None:
-            ewc_loss = 0.0
+            ewc_loss = torch.tensor(0.0, device="cpu")
             for name, param in model.named_parameters():
                 if param.requires_grad and name in self.ewc_fisher:
-                    fisher_val = self.ewc_fisher[name].to(param.device, non_blocking=True)
-                    opt_val = self.ewc_opt[name].to(param.device, non_blocking=True)
-                    ewc_loss += (fisher_val * (param - opt_val) ** 2).sum()
-                    del fisher_val, opt_val
+                    fisher_val = self.ewc_fisher[name]   # stays CPU
+                    opt_val    = self.ewc_opt[name]       # stays CPU
+                    ewc_loss  += (fisher_val * (param.cpu() - opt_val) ** 2).sum()
 
-            loss = loss + (self.args.ewc_lambda / 2.0) * ewc_loss
+            loss = loss + (self.args.ewc_lambda / 2.0) * ewc_loss.to(loss.device)
 
         return (loss, outputs) if return_outputs else loss
 
