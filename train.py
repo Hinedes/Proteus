@@ -288,6 +288,9 @@ class EWCTrainer(Trainer):
     def __init__(self, *args, ewc_lambda=5000.0, fisher=None, opt_params=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.ewc_lambda       = ewc_lambda
+        self.args.ewc_lambda  = ewc_lambda
+        self.ewc_fisher       = fisher
+        self.ewc_opt          = opt_params
         self._fisher_dict     = fisher      # {name: tensor} on CPU, freed after build
         self._opt_params_dict = opt_params  # {name: tensor} on CPU, freed after build
         self._fisher_flat_cpu = None        # 1D BF16 pinned CPU tensor
@@ -334,27 +337,19 @@ class EWCTrainer(Trainer):
         )
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        from torch.nn.utils import parameters_to_vector
-
         outputs = model(**inputs)
         loss    = outputs.loss
 
-        if self._fisher_dict is not None and not self._built:
-            self._build_pairs(model)
+        if hasattr(self, "ewc_fisher") and self.ewc_fisher is not None:
+            ewc_loss = 0.0
+            for name, param in model.named_parameters():
+                if param.requires_grad and name in self.ewc_fisher:
+                    fisher_val = self.ewc_fisher[name].to(param.device, non_blocking=True)
+                    opt_val = self.ewc_opt[name].to(param.device, non_blocking=True)
+                    ewc_loss += (fisher_val * (param - opt_val) ** 2).sum()
+                    del fisher_val, opt_val
 
-        if self._tracked_params is not None:
-            dev = next(model.parameters()).device
-
-            # Current param flat vector — single fused GPU operation
-            param_flat = parameters_to_vector(self._tracked_params)
-
-            # H2D transfer: one contiguous copy each, non-blocking
-            fisher_flat = self._fisher_flat_cpu.to(dev, non_blocking=True)
-            opt_flat    = self._opt_flat_cpu.to(dev, non_blocking=True)
-
-            # Single fused penalty kernel
-            penalty = (fisher_flat * (param_flat - opt_flat) ** 2).sum()
-            loss    = loss + (self.ewc_lambda / 2.0) * penalty
+            loss = loss + (self.args.ewc_lambda / 2.0) * ewc_loss
 
         return (loss, outputs) if return_outputs else loss
 
