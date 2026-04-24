@@ -230,20 +230,8 @@ log "Proteus full experimental run"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
-# ── TunableOp: one-time tuning pass ───────────────────────────────────────────
-if [[ ! -f "$TUNABLEOP_CSV" ]]; then
-    log "TunableOp: no CSV found — running one-time tuning pass (100 steps)..."
-    # export PYTORCH_TUNABLEOP_TUNING=1
-    python train.py --domain medical --condition proteus \
-        --max_steps 100 --batch_size 16 --grad_accum 1 \
-        --out_dir /tmp/tunableop_warmup 2>&1 | tee -a "$LOG"
-    # export PYTORCH_TUNABLEOP_TUNING=0
-    log "TunableOp: tuning complete. CSV at $TUNABLEOP_CSV — active for all runs."
-else
-    log "TunableOp: CSV found — tuning skipped, kernels pre-loaded."
-    # export PYTORCH_TUNABLEOP_TUNING=0
-fi
-# ──────────────────────────────────────────────────────────────────────────────
+# ── TunableOp warmup disabled ────────────────────────────────────────────────
+# TunableOp variables and warmup pass are intentionally disabled.
 
 notify "Proteus full run started" \
 "Sections: Extended 4k | Canonical chains | Attention sweeps
