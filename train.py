@@ -798,6 +798,8 @@ def main():
         # ── EWC: compute and save Fisher state for next domain
         if args.condition == "ewc":
             print("[ewc] Computing Fisher matrix for next domain...")
+            gc.collect()
+            torch.cuda.empty_cache()
             new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
             save_ewc_state(new_fisher, new_opt, out_dir)
 
