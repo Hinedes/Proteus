@@ -32,9 +32,9 @@ export PYTHONWARNINGS="ignore::UserWarning"
 # One-time tuning pass selects the fastest hipBLASLt/rocBLAS kernel per GEMM
 # shape. CSV is reused by all subsequent runs at zero overhead.
 # Expected gain: 5-22% throughput improvement on LLM workloads.
-TUNABLEOP_CSV="results/tunableop_results.csv"
-export PYTORCH_TUNABLEOP_ENABLED=1
-export PYTORCH_TUNABLEOP_FILENAME="$TUNABLEOP_CSV"
+# TUNABLEOP_CSV="results/tunableop_results.csv"
+# export PYTORCH_TUNABLEOP_ENABLED=1
+# export PYTORCH_TUNABLEOP_FILENAME="$TUNABLEOP_CSV"
 START_TIME=$(date +%s)
 RATE=1.99   # USD/hr for MI300X
 
@@ -233,15 +233,15 @@ log "=============================="
 # ── TunableOp: one-time tuning pass ───────────────────────────────────────────
 if [[ ! -f "$TUNABLEOP_CSV" ]]; then
     log "TunableOp: no CSV found — running one-time tuning pass (100 steps)..."
-    export PYTORCH_TUNABLEOP_TUNING=1
+    # export PYTORCH_TUNABLEOP_TUNING=1
     python train.py --domain medical --condition proteus \
         --max_steps 100 --batch_size 16 --grad_accum 1 \
         --out_dir /tmp/tunableop_warmup 2>&1 | tee -a "$LOG"
-    export PYTORCH_TUNABLEOP_TUNING=0
+    # export PYTORCH_TUNABLEOP_TUNING=0
     log "TunableOp: tuning complete. CSV at $TUNABLEOP_CSV — active for all runs."
 else
     log "TunableOp: CSV found — tuning skipped, kernels pre-loaded."
-    export PYTORCH_TUNABLEOP_TUNING=0
+    # export PYTORCH_TUNABLEOP_TUNING=0
 fi
 # ──────────────────────────────────────────────────────────────────────────────
 
