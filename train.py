@@ -795,20 +795,26 @@ def main():
             "eta_s": 0.0,
         })
 
-        # ── EWC: compute and save Fisher state for next domain
-        if args.condition == "ewc":
-            print("[ewc] Computing Fisher matrix for next domain...")
-            gc.collect()
-            torch.cuda.empty_cache()
-            new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
-            save_ewc_state(new_fisher, new_opt, out_dir)
-
         # ── Cleanup hooks before save
         for h in hooks:
             h.remove()
 
         trainer.save_model(str(out_dir))
         tokenizer.save_pretrained(str(out_dir))
+
+        # --- THE FIX: ASSASSINATE THE TRAINER ---
+        print("[cleanup] Destroying HF Trainer and freeing optimizer VRAM...")
+        del trainer
+        gc.collect()
+        torch.cuda.empty_cache()
+        # ----------------------------------------
+
+        # ── EWC: compute and save Fisher state for next domain
+        if args.condition == "ewc":
+            print("[ewc] Computing Fisher matrix for next domain...")
+            new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
+            save_ewc_state(new_fisher, new_opt, out_dir)
+
         status_writer.emit({
             "phase": "train",
             "state": "done",

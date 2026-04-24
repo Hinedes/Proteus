@@ -245,23 +245,23 @@ log "=============================="
 log "SECTION 1: Extended 4k Medical→Legal"
 log "=============================="
 
-run_train medical full     checkpoints/full_4k/medical    --max_steps "$LONG_STEPS"
-run_eval  checkpoints/full_4k/medical    full_4k_after_medical
-
-run_train legal   full     checkpoints/full_4k/legal      --max_steps "$LONG_STEPS" \
-    --start_from checkpoints/full_4k/medical
-run_eval  checkpoints/full_4k/legal      full_4k_after_legal
-
-run_train medical proteus  checkpoints/proteus_4k/medical --max_steps "$LONG_STEPS"
-run_eval  checkpoints/proteus_4k/medical proteus_4k_after_medical
-
-run_train legal   proteus  checkpoints/proteus_4k/legal   --max_steps "$LONG_STEPS" \
-    --start_from checkpoints/proteus_4k/medical
-run_eval  checkpoints/proteus_4k/legal   proteus_4k_after_legal
-
-notify "Section 1 done: Extended 4k" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+# run_train medical full     checkpoints/full_4k/medical    --max_steps "$LONG_STEPS"
+# run_eval  checkpoints/full_4k/medical    full_4k_after_medical
+#
+# run_train legal   full     checkpoints/full_4k/legal      --max_steps "$LONG_STEPS" \
+#     --start_from checkpoints/full_4k/medical
+# run_eval  checkpoints/full_4k/legal      full_4k_after_legal
+#
+# run_train medical proteus  checkpoints/proteus_4k/medical --max_steps "$LONG_STEPS"
+# run_eval  checkpoints/proteus_4k/medical proteus_4k_after_medical
+#
+# run_train legal   proteus  checkpoints/proteus_4k/legal   --max_steps "$LONG_STEPS" \
+#     --start_from checkpoints/proteus_4k/medical
+# run_eval  checkpoints/proteus_4k/legal   proteus_4k_after_legal
+#
+# notify "Section 1 done: Extended 4k" \
+# "$(eval_summary)
+# Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
 
 # ══════════════════════════════════════════════
@@ -271,65 +271,65 @@ log "=============================="
 log "SECTION 2: Canonical 4-domain chains (2000 steps)"
 log "=============================="
 
-log "--- CHAIN: proteus_canon ---"
-run_train medical    proteus checkpoints/proteus_canon/medical       --max_steps "$STEPS"
-run_eval  checkpoints/proteus_canon/medical       proteus_canon_after_medical
+# log "--- CHAIN: proteus_canon ---"
+# run_train medical    proteus checkpoints/proteus_canon/medical       --max_steps "$STEPS"
+# run_eval  checkpoints/proteus_canon/medical       proteus_canon_after_medical
+#
+# run_train legal      proteus checkpoints/proteus_canon/legal         --max_steps "$STEPS" \
+#     --start_from checkpoints/proteus_canon/medical
+# run_eval  checkpoints/proteus_canon/legal         proteus_canon_after_legal
+#
+# run_train code       proteus checkpoints/proteus_canon/code          --max_steps "$STEPS" \
+#     --start_from checkpoints/proteus_canon/legal
+# run_eval  checkpoints/proteus_canon/code          proteus_canon_after_code
+#
+# run_train multilingual proteus checkpoints/proteus_canon/multilingual --max_steps "$STEPS" \
+#     --start_from checkpoints/proteus_canon/code
+# run_eval  checkpoints/proteus_canon/multilingual  proteus_canon_after_multilingual
+#
+# notify "Proteus canonical chain done" \
+# "$(eval_summary)
+# Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+#
+# log "--- CHAIN: full_canon ---"
+# run_train medical    full checkpoints/full_canon/medical       --max_steps "$STEPS"
+# run_eval  checkpoints/full_canon/medical       full_canon_after_medical
+#
+# run_train legal      full checkpoints/full_canon/legal         --max_steps "$STEPS" \
+#     --start_from checkpoints/full_canon/medical
+# run_eval  checkpoints/full_canon/legal         full_canon_after_legal
+#
+# run_train code       full checkpoints/full_canon/code          --max_steps "$STEPS" \
+#     --start_from checkpoints/full_canon/legal
+# run_eval  checkpoints/full_canon/code          full_canon_after_code
+#
+# run_train multilingual full checkpoints/full_canon/multilingual --max_steps "$STEPS" \
+#     --start_from checkpoints/full_canon/code
+# run_eval  checkpoints/full_canon/multilingual  full_canon_after_multilingual
+#
+# log "--- CHAIN: lora_canon ---"
+# run_train medical    lora checkpoints/lora_canon/medical       --max_steps "$STEPS"
+# run_eval  checkpoints/lora_canon/medical       lora_canon_after_medical
+#
+# run_train legal      lora checkpoints/lora_canon/legal         --max_steps "$STEPS" \
+#     --start_from checkpoints/lora_canon/medical
+# run_eval  checkpoints/lora_canon/legal         lora_canon_after_legal
+#
+# run_train code       lora checkpoints/lora_canon/code          --max_steps "$STEPS" \
+#     --start_from checkpoints/lora_canon/legal
+# run_eval  checkpoints/lora_canon/code          lora_canon_after_code
+#
+# run_train multilingual lora checkpoints/lora_canon/multilingual --max_steps "$STEPS" \
+#     --start_from checkpoints/lora_canon/code
+# run_eval  checkpoints/lora_canon/multilingual  lora_canon_after_multilingual
+#
+# notify "LoRA canonical chain done" \
+# "$(eval_summary)
+# Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
-run_train legal      proteus checkpoints/proteus_canon/legal         --max_steps "$STEPS" \
-    --start_from checkpoints/proteus_canon/medical
-run_eval  checkpoints/proteus_canon/legal         proteus_canon_after_legal
-
-run_train code       proteus checkpoints/proteus_canon/code          --max_steps "$STEPS" \
-    --start_from checkpoints/proteus_canon/legal
-run_eval  checkpoints/proteus_canon/code          proteus_canon_after_code
-
-run_train multilingual proteus checkpoints/proteus_canon/multilingual --max_steps "$STEPS" \
-    --start_from checkpoints/proteus_canon/code
-run_eval  checkpoints/proteus_canon/multilingual  proteus_canon_after_multilingual
-
-notify "Proteus canonical chain done" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
-
-log "--- CHAIN: full_canon ---"
-run_train medical    full checkpoints/full_canon/medical       --max_steps "$STEPS"
-run_eval  checkpoints/full_canon/medical       full_canon_after_medical
-
-run_train legal      full checkpoints/full_canon/legal         --max_steps "$STEPS" \
-    --start_from checkpoints/full_canon/medical
-run_eval  checkpoints/full_canon/legal         full_canon_after_legal
-
-run_train code       full checkpoints/full_canon/code          --max_steps "$STEPS" \
-    --start_from checkpoints/full_canon/legal
-run_eval  checkpoints/full_canon/code          full_canon_after_code
-
-run_train multilingual full checkpoints/full_canon/multilingual --max_steps "$STEPS" \
-    --start_from checkpoints/full_canon/code
-run_eval  checkpoints/full_canon/multilingual  full_canon_after_multilingual
-
-log "--- CHAIN: lora_canon ---"
-run_train medical    lora checkpoints/lora_canon/medical       --max_steps "$STEPS"
-run_eval  checkpoints/lora_canon/medical       lora_canon_after_medical
-
-run_train legal      lora checkpoints/lora_canon/legal         --max_steps "$STEPS" \
-    --start_from checkpoints/lora_canon/medical
-run_eval  checkpoints/lora_canon/legal         lora_canon_after_legal
-
-run_train code       lora checkpoints/lora_canon/code          --max_steps "$STEPS" \
-    --start_from checkpoints/lora_canon/legal
-run_eval  checkpoints/lora_canon/code          lora_canon_after_code
-
-run_train multilingual lora checkpoints/lora_canon/multilingual --max_steps "$STEPS" \
-    --start_from checkpoints/lora_canon/code
-run_eval  checkpoints/lora_canon/multilingual  lora_canon_after_multilingual
-
-notify "LoRA canonical chain done" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
-
-log "--- CHAIN: ewc_canon ---"
-run_train medical    ewc checkpoints/ewc_canon/medical       --max_steps "$STEPS"
-run_eval  checkpoints/ewc_canon/medical       ewc_canon_after_medical
+#log "--- CHAIN: ewc_canon ---"
+# run_train medical    ewc checkpoints/ewc_canon/medical       --max_steps "$STEPS"
+#run_eval  checkpoints/ewc_canon/medical       ewc_canon_after_medical
 
 run_train legal      ewc checkpoints/ewc_canon/legal         --max_steps "$STEPS" \
     --start_from checkpoints/ewc_canon/medical \
