@@ -274,6 +274,21 @@ run_ewc_domain() {
 }
 
 # ─────────────────────────────────────────────
+# ── Kill stale training processes from previous runs ─────────────────────────
+log "Cleaning up stale Python processes..."
+for pid in $(pgrep -f "python train.py" 2>/dev/null); do
+    log "  Killing stale PID $pid"
+    kill -9 "$pid" 2>/dev/null || true
+done
+for pid in $(pgrep -f "python eval.py" 2>/dev/null); do
+    log "  Killing stale PID $pid"
+    kill -9 "$pid" 2>/dev/null || true
+done
+sleep 2
+log "VRAM state after cleanup:"
+rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
+# ─────────────────────────────────────────────────────────────────────────────
+
 log "=============================="
 log "Proteus full experimental run"
 log "ntfy topic: $NTFY_TOPIC"
