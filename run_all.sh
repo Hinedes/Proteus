@@ -28,13 +28,6 @@ export TRANSFORMERS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
 export PYTHONWARNINGS="ignore::UserWarning"
 
-# ── TunableOp: GEMM kernel tuning for MI300X ──────────────────────────────────
-# One-time tuning pass selects the fastest hipBLASLt/rocBLAS kernel per GEMM
-# shape. CSV is reused by all subsequent runs at zero overhead.
-# Expected gain: 5-22% throughput improvement on LLM workloads.
-# TUNABLEOP_CSV="results/tunableop_results.csv"
-# export PYTORCH_TUNABLEOP_ENABLED=1
-# export PYTORCH_TUNABLEOP_FILENAME="$TUNABLEOP_CSV"
 START_TIME=$(date +%s)
 RATE=1.99   # USD/hr for MI300X
 
@@ -192,7 +185,6 @@ trap 'stop_status_renderer; kill ${HEARTBEAT_PID:-} 2>/dev/null' EXIT
 # Helpers
 # ─────────────────────────────────────────────
 run_train() {
-    # run_train <domain> <condition> <out_dir> [extra args...]
     local domain="$1" condition="$2" out_dir="$3"
     shift 3
     set_step "train/$condition/$domain"
@@ -244,7 +236,6 @@ run_ewc_domain() {
         --domain $domain \
         --batch_size 16 \
         --grad_accum 1 \
-        --gradient_checkpointing \
         --ewc_samples 128 \
         --out_dir ./checkpoints/ewc_canon/${domain} \
         ${prev_domain:+--ewc_state ./checkpoints/ewc_canon/${prev_domain}/fisher.pt} \
@@ -273,7 +264,6 @@ run_ewc_domain() {
     df -h / 2>&1 | tee -a "$LOG"
 }
 
-# ─────────────────────────────────────────────
 # ── Kill stale training processes and free VRAM ──────────────────────────────
 log "Cleaning up stale Python processes..."
 for pid in $(pgrep -f "python train.py" 2>/dev/null); do
@@ -315,9 +305,6 @@ log "SECTION 2: Canonical 4-domain chains (2000 steps)"
 log "=============================="
 
 # proteus_canon, full_canon, lora_canon — DONE, skip
-# log "--- CHAIN: proteus_canon ---"   # DONE
-# log "--- CHAIN: full_canon ---"       # DONE
-# log "--- CHAIN: lora_canon ---"       # DONE
 
 log "--- CHAIN: ewc_canon ---"
 # medical DONE — checkpoint + fisher.pt intact at checkpoints/ewc_canon/medical/
