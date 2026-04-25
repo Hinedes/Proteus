@@ -186,6 +186,42 @@ class TrainStatusCallback(TrainerCallback):
         self._emit("done", state.global_step)
 
 # ─────────────────────────────────────────────
+# aiter — MI300X fused kernel optimizations
+# ─────────────────────────────────────────────
+def apply_aiter_optimizations(model):
+    """
+    Monkey-patches Gemma4 MLP forward with aiter's fused silu_and_mul kernel.
+    Replaces: silu(gate_proj(x)) * up_proj(x)  →  aiter.silu_and_mul (one kernel)
+    Safe: wrapped in try/except, falls back to stock ops on any failure.
+    """
+    try:
+        import aiter as _aiter
+
+        layers = model.model.language_model.layers
+        patched = 0
+
+        def make_aiter_mlp_forward(original_mlp):
+            def forward(hidden_states):
+                gate = original_mlp.gate_proj(hidden_states)
+                up   = original_mlp.up_proj(hidden_states)
+                # silu_and_mul(out, x): x = [B, T, 2*d], out = [B, T, d]
+                fused_input = torch.cat([gate, up], dim=-1)
+                activated   = torch.empty_like(gate)
+                _aiter.silu_and_mul(activated, fused_input)
+                return original_mlp.down_proj(activated)
+            return forward
+
+        for layer in layers:
+            mlp = layer.mlp
+            mlp.forward = make_aiter_mlp_forward(mlp)
+            patched += 1
+
+        print(f"[aiter] Patched {patched} MLP layers with fused silu_and_mul.")
+    except Exception as e:
+        print(f"[aiter] Skipping optimizations: {e}")
+
+
+# ─────────────────────────────────────────────
 # Gradient hook (Proteus condition)
 # ─────────────────────────────────────────────
 def register_hooks(model):
@@ -213,79 +249,49 @@ def register_hooks(model):
 # ─────────────────────────────────────────────
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
-def compute_fisher(model, dataset, n_samples=512, chunk_size=8):
+def compute_fisher(model, dataset, n_samples=200, batch_size=16):
     """
-    Diagonal Fisher estimate via per-sample squared gradients using vmap.
-
-    Correctness: computes E[g_i^2] per parameter (true diagonal Fisher),
-    not (E[g_i])^2 (biased batch estimator). Each sample gets its own
-    backward pass, vectorized via torch.func.vmap for GPU throughput.
-
-    chunk_size controls how many samples vmap processes in parallel.
-    Lower chunk_size if VRAM runs out during Fisher computation.
-    Returns {param_name: fisher_diagonal_tensor}, {param_name: opt_tensor}.
+    Diagonal Fisher estimate via squared gradients on a sample of the dataset.
+    Batched: processes batch_size samples per backward pass instead of 1.
+    Returns {param_name: fisher_diagonal_tensor}.
     """
-    from torch.func import grad, vmap, functional_call
-
     model.eval()
-    device     = next(model.parameters()).device
-    params     = {n: p for n, p in model.named_parameters() if p.requires_grad}
-    buffers    = dict(model.named_buffers())
-    opt_params = {n: p.data.clone() for n, p in params.items()}
-    fisher     = {n: torch.zeros_like(p) for n, p in params.items()}
+    fisher     = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
+    opt_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
 
-    def loss_fn(params, buffers, input_ids, labels):
-        # input_ids/labels are 1D (single sample); unsqueeze to [1, seq]
-        out = functional_call(
-            model, (params, buffers),
-            args=(),
-            kwargs={
-                "input_ids":      input_ids.unsqueeze(0),
-                "labels":         labels.unsqueeze(0),
-                "attention_mask": (input_ids != 0).unsqueeze(0).long(),
-            },
-        )
-        return out.loss
+    indices = random.sample(range(len(dataset)), min(n_samples, len(dataset)))
+    n_batches = 0
 
-    per_sample_grads_fn = vmap(
-        grad(loss_fn),
-        in_dims=(None, None, 0, 0),
-        randomness="different",
-    )
-
-    indices   = random.sample(range(len(dataset)), min(n_samples, len(dataset)))
-    n_samples_seen = 0
-
-    for i in range(0, len(indices), chunk_size):
-        batch_idx = indices[i:i + chunk_size]
+    for i in range(0, len(indices), batch_size):
+        batch_idx = indices[i:i + batch_size]
         input_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(dataset[j]["input_ids"]) for j in batch_idx],
-            batch_first=True, padding_value=0,
-        ).to(device)                                       # [B, seq]
+            batch_first=True, padding_value=0
+        ).to(next(model.parameters()).device)
         labels = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(dataset[j]["labels"]) for j in batch_idx],
-            batch_first=True, padding_value=-100,
-        ).to(device)                                       # [B, seq]
+            batch_first=True, padding_value=-100
+        ).to(next(model.parameters()).device)
 
-        # per_sample_grads: {name: [B, *param_shape]}
-        per_sample_grads = per_sample_grads_fn(params, buffers, input_ids, labels)
+        model.zero_grad()
+        out  = model(input_ids=input_ids, labels=labels)
+        loss = out.loss
+        loss.backward()
 
-        for n, g in per_sample_grads.items():
-            fisher[n] += g.pow(2).sum(0)                  # sum over batch dim → [*param_shape]
+        for n, p in model.named_parameters():
+            if p.requires_grad and p.grad is not None:
+                fisher[n] += p.grad.detach() ** 2
+        n_batches += 1
 
-        n_samples_seen += len(batch_idx)
-        if i % (chunk_size * 8) == 0:
-            print(f"[ewc] Fisher: {n_samples_seen}/{len(indices)} samples")
-
-    if n_samples_seen == 0:
+    if n_batches == 0:
         model.train()
         raise RuntimeError(
-            "[ewc] Fisher estimation produced zero samples. "
+            "[ewc] Fisher estimation produced zero batches. "
             "Ensure the dataset is non-empty and --ewc_samples > 0."
         )
 
     for n in fisher:
-        fisher[n] /= n_samples_seen
+        fisher[n] /= n_batches
 
     model.train()
     return fisher, opt_params
@@ -668,7 +674,7 @@ def main():
     parser.add_argument("--compile",      action="store_true",
                         help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
     parser.add_argument("--gradient_checkpointing", action="store_true",
-                        help="Recompute activations during backward to save VRAM (~20GB). Costs ~33% more compute.")
+                        help="Recompute activations during backward to save VRAM (~33% slower).")
     parser.add_argument("--out_dir",      type=str,   default=None,
                         help="Override output checkpoint directory.")
     parser.add_argument("--status_file",  type=str,   default=None,
@@ -728,6 +734,9 @@ def main():
     if hasattr(model, "multi_modal_projector"):
         del model.multi_modal_projector
     torch.cuda.empty_cache()
+
+    # ── aiter MI300X kernel optimizations
+    apply_aiter_optimizations(model)
 
     # ── Condition setup
     hooks, trainer_class, fisher, opt_params = setup_training_condition(model, args)

@@ -127,20 +127,15 @@ PY
 }
 
 start_status_renderer() {
-    [[ ! -f /dev/tty ]] && return
+    [[ ! -t 2 ]] && return
     rm -f "$STATUS_FILE"; : > "$STATUS_FILE"
-    ( TTY=/dev/tty
-      while true; do
+    ( while true; do
         if [[ -s "$STATUS_FILE" ]]; then
-            line=$(format_status_line 2>/dev/null)
-            if [[ -n "$line" ]]; then
-                rows=$(tput lines 2>/dev/null || echo 24)
-                printf "\0337\033[%d;0H\033[2K\033[1;36m%s\033[0m\0338" \
-                    "$rows" "$line" > "$TTY"
-            fi
+            line=$(format_status_line)
+            [[ -n "$line" ]] && printf "\r\033[2K%s" "$line" >&2
         fi
         sleep 1
-      done ) &
+    done ) &
     STATUS_RENDER_PID=$!
 }
 
@@ -150,10 +145,7 @@ stop_status_renderer() {
         wait "$STATUS_RENDER_PID" 2>/dev/null || true
         STATUS_RENDER_PID=""
     fi
-    if [[ -f /dev/tty ]]; then
-        rows=$(tput lines 2>/dev/null || echo 24)
-        printf "\0337\033[%d;0H\033[2K\0338" "$rows" > /dev/tty
-    fi
+    [[ -t 2 ]] && printf "\r\033[2K" >&2
     rm -f "$STATUS_FILE"
 }
 
@@ -275,21 +267,6 @@ run_ewc_domain() {
 }
 
 # ─────────────────────────────────────────────
-# ── Kill stale training processes from previous runs ─────────────────────────
-log "Cleaning up stale Python processes..."
-for pid in $(pgrep -f "python train.py" 2>/dev/null); do
-    log "  Killing stale PID $pid"
-    kill -9 "$pid" 2>/dev/null || true
-done
-for pid in $(pgrep -f "python eval.py" 2>/dev/null); do
-    log "  Killing stale PID $pid"
-    kill -9 "$pid" 2>/dev/null || true
-done
-sleep 2
-log "VRAM state after cleanup:"
-rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
-# ─────────────────────────────────────────────────────────────────────────────
-
 log "=============================="
 log "Proteus full experimental run"
 log "ntfy topic: $NTFY_TOPIC"
@@ -393,7 +370,7 @@ log "=============================="
 # Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
 log "--- CHAIN: ewc_canon ---"
-#run_ewc_domain medical ""
+run_ewc_domain medical ""
 run_ewc_domain legal medical
 run_ewc_domain code legal
 run_ewc_domain multilingual code
