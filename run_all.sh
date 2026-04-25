@@ -393,8 +393,8 @@ log "=============================="
 # Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
 log "--- CHAIN: ewc_canon ---"
-run_ewc_domain medical ""
-run_ewc_domain legal medical
+#run_ewc_domain medical ""
+#run_ewc_domain legal medical
 run_ewc_domain code legal
 run_ewc_domain multilingual code
 
