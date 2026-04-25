@@ -213,7 +213,7 @@ def register_hooks(model):
 # ─────────────────────────────────────────────
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
-def compute_fisher(model, dataset, n_samples=200, batch_size=16):
+def compute_fisher(model, dataset, n_samples=512, batch_size=1):  # batch_size=1
     """
     Diagonal Fisher estimate via squared gradients on a sample of the dataset.
     Batched: processes batch_size samples per backward pass instead of 1.
