@@ -44,12 +44,26 @@ for i, layer in enumerate(layers):
         grad = getattr(layer.mlp, name).weight.grad
         if grad is None:
             print(f"[FAIL] Layer {i} {name}: grad None"); failed += 1; continue
-        core  = grad[:CORE_MID, :CORE_HIDDEN] if ptype != "down" else grad[:CORE_HIDDEN, :CORE_MID]
-        outer = grad[CORE_MID:, :] if ptype != "down" else grad[CORE_HIDDEN:, :]
-        if core.abs().max() == 0.0 and outer.abs().max() > 0.0:
+        
+        # 1. Extract the Core quadrant
+        if ptype != "down":
+            core = grad[:CORE_MID, :CORE_HIDDEN]
+            outer_bottom = grad[CORE_MID:, :]
+            outer_top_right = grad[:CORE_MID, CORE_HIDDEN:]
+        else:
+            core = grad[:CORE_HIDDEN, :CORE_MID]
+            outer_bottom = grad[CORE_HIDDEN:, :]
+            outer_top_right = grad[:CORE_HIDDEN, CORE_MID:]
+            
+        # 2. Find the maximum gradient across ALL outer regions
+        outer_max = max(outer_bottom.abs().max().item(), outer_top_right.abs().max().item())
+        core_max = core.abs().max().item()
+        
+        # 3. Assert Core is perfectly frozen (0.0) and Outer is learning (> 0.0)
+        if core_max == 0.0 and outer_max > 0.0:
             passed += 1
         else:
-            print(f"[FAIL] Layer {i} {name}: core_max={core.abs().max():.2e} outer_max={outer.abs().max():.2e}")
+            print(f"[FAIL] Layer {i} {name}: core_max={core_max:.2e} outer_max={outer_max:.2e}")
             failed += 1
 
 print(f"\n{'PASSED' if failed==0 else 'FAILED'}: {passed}/{passed+failed} checks.")
