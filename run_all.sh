@@ -244,6 +244,7 @@ run_ewc_domain() {
         --domain $domain \
         --batch_size 16 \
         --grad_accum 1 \
+        --gradient_checkpointing \
         --ewc_samples 512 \
         --out_dir ./checkpoints/ewc_canon/${domain} \
         ${prev_domain:+--ewc_state ./checkpoints/ewc_canon/${prev_domain}/fisher.pt} \

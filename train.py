@@ -667,6 +667,8 @@ def main():
                         ))
     parser.add_argument("--compile",      action="store_true",
                         help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
+    parser.add_argument("--gradient_checkpointing", action="store_true",
+                        help="Recompute activations during backward to save VRAM (~20GB). Costs ~33% more compute.")
     parser.add_argument("--out_dir",      type=str,   default=None,
                         help="Override output checkpoint directory.")
     parser.add_argument("--status_file",  type=str,   default=None,
@@ -765,7 +767,7 @@ def main():
         max_steps                = args.max_steps,
         per_device_train_batch_size = args.batch_size,
         gradient_accumulation_steps = args.grad_accum,
-        gradient_checkpointing   = False,
+        gradient_checkpointing   = args.gradient_checkpointing,
         learning_rate            = args.lr,
         lr_scheduler_type        = "cosine",
         warmup_steps             = 25,
