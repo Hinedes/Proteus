@@ -213,49 +213,79 @@ def register_hooks(model):
 # ─────────────────────────────────────────────
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
-def compute_fisher(model, dataset, n_samples=512, batch_size=1):  # batch_size=1
+def compute_fisher(model, dataset, n_samples=512, chunk_size=8):
     """
-    Diagonal Fisher estimate via squared gradients on a sample of the dataset.
-    Batched: processes batch_size samples per backward pass instead of 1.
-    Returns {param_name: fisher_diagonal_tensor}.
+    Diagonal Fisher estimate via per-sample squared gradients using vmap.
+
+    Correctness: computes E[g_i^2] per parameter (true diagonal Fisher),
+    not (E[g_i])^2 (biased batch estimator). Each sample gets its own
+    backward pass, vectorized via torch.func.vmap for GPU throughput.
+
+    chunk_size controls how many samples vmap processes in parallel.
+    Lower chunk_size if VRAM runs out during Fisher computation.
+    Returns {param_name: fisher_diagonal_tensor}, {param_name: opt_tensor}.
     """
+    from torch.func import grad, vmap, functional_call
+
     model.eval()
-    fisher     = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
-    opt_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+    device     = next(model.parameters()).device
+    params     = {n: p for n, p in model.named_parameters() if p.requires_grad}
+    buffers    = dict(model.named_buffers())
+    opt_params = {n: p.data.clone() for n, p in params.items()}
+    fisher     = {n: torch.zeros_like(p) for n, p in params.items()}
 
-    indices = random.sample(range(len(dataset)), min(n_samples, len(dataset)))
-    n_batches = 0
+    def loss_fn(params, buffers, input_ids, labels):
+        # input_ids/labels are 1D (single sample); unsqueeze to [1, seq]
+        out = functional_call(
+            model, (params, buffers),
+            args=(),
+            kwargs={
+                "input_ids":      input_ids.unsqueeze(0),
+                "labels":         labels.unsqueeze(0),
+                "attention_mask": (input_ids != 0).unsqueeze(0).long(),
+            },
+        )
+        return out.loss
 
-    for i in range(0, len(indices), batch_size):
-        batch_idx = indices[i:i + batch_size]
+    per_sample_grads_fn = vmap(
+        grad(loss_fn),
+        in_dims=(None, None, 0, 0),
+        randomness="different",
+    )
+
+    indices   = random.sample(range(len(dataset)), min(n_samples, len(dataset)))
+    n_samples_seen = 0
+
+    for i in range(0, len(indices), chunk_size):
+        batch_idx = indices[i:i + chunk_size]
         input_ids = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(dataset[j]["input_ids"]) for j in batch_idx],
-            batch_first=True, padding_value=0
-        ).to(next(model.parameters()).device)
+            batch_first=True, padding_value=0,
+        ).to(device)                                       # [B, seq]
         labels = torch.nn.utils.rnn.pad_sequence(
             [torch.tensor(dataset[j]["labels"]) for j in batch_idx],
-            batch_first=True, padding_value=-100
-        ).to(next(model.parameters()).device)
+            batch_first=True, padding_value=-100,
+        ).to(device)                                       # [B, seq]
 
-        model.zero_grad()
-        out  = model(input_ids=input_ids, labels=labels)
-        loss = out.loss
-        loss.backward()
+        # per_sample_grads: {name: [B, *param_shape]}
+        per_sample_grads = per_sample_grads_fn(params, buffers, input_ids, labels)
 
-        for n, p in model.named_parameters():
-            if p.requires_grad and p.grad is not None:
-                fisher[n] += p.grad.detach() ** 2
-        n_batches += 1
+        for n, g in per_sample_grads.items():
+            fisher[n] += g.pow(2).sum(0)                  # sum over batch dim → [*param_shape]
 
-    if n_batches == 0:
+        n_samples_seen += len(batch_idx)
+        if i % (chunk_size * 8) == 0:
+            print(f"[ewc] Fisher: {n_samples_seen}/{len(indices)} samples")
+
+    if n_samples_seen == 0:
         model.train()
         raise RuntimeError(
-            "[ewc] Fisher estimation produced zero batches. "
+            "[ewc] Fisher estimation produced zero samples. "
             "Ensure the dataset is non-empty and --ewc_samples > 0."
         )
 
     for n in fisher:
-        fisher[n] /= n_batches
+        fisher[n] /= n_samples_seen
 
     model.train()
     return fisher, opt_params
