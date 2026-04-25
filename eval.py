@@ -155,6 +155,8 @@ def apply_custom_lora(model, checkpoint_path: str):
       1. Loads the safetensors to find all lora_A/lora_B tensors
       2. Re-registers them as Parameters on the projection modules
       3. Re-registers the forward hooks that apply the LoRA delta
+    Handles both attention LoRA (q_proj, v_proj) and FFN LoRA
+    (gate_proj, up_proj, down_proj) by routing from the key names.
     """
     from safetensors.torch import load_file
     from pathlib import Path as _Path
@@ -171,14 +173,30 @@ def apply_custom_lora(model, checkpoint_path: str):
         return []
 
     r       = next(v for k, v in lora_keys.items() if "lora_A" in k).shape[0]
-    alpha   = r * 2   # matches train.py: r=16, alpha=32 → scaling=2.0
+    alpha   = r * 2   # scaling = alpha/r = 2.0 (matches train.py r=64, alpha=128)
     scaling = alpha / r
 
     hooks  = []
     layers = model.model.language_model.layers
     _dev   = next(model.parameters()).device
 
+    def _register(module_obj, key_A, key_B):
+        lora_A = torch.nn.Parameter(lora_keys[key_A].to(_dev), requires_grad=False)
+        lora_B = torch.nn.Parameter(lora_keys[key_B].to(_dev), requires_grad=False)
+        module_obj.register_parameter("lora_A", lora_A)
+        module_obj.register_parameter("lora_B", lora_B)
+
+        def make_hook(A, B):
+            def hook(module, input, output):
+                x = input[0]
+                delta = torch.nn.functional.linear(x, B @ A) * scaling
+                return output + delta
+            return hook
+
+        hooks.append(module_obj.register_forward_hook(make_hook(lora_A, lora_B)))
+
     for layer_idx, layer in enumerate(layers):
+        # Attention LoRA (standard baseline: q_proj, v_proj)
         for proj_name in ("q_proj", "v_proj"):
             if not hasattr(layer.self_attn, proj_name):
                 continue
@@ -186,21 +204,17 @@ def apply_custom_lora(model, checkpoint_path: str):
             key_B = f"model.language_model.layers.{layer_idx}.self_attn.{proj_name}.lora_B"
             if key_A not in lora_keys or key_B not in lora_keys:
                 continue
+            _register(getattr(layer.self_attn, proj_name), key_A, key_B)
 
-            proj   = getattr(layer.self_attn, proj_name)
-            lora_A = torch.nn.Parameter(lora_keys[key_A].to(_dev), requires_grad=False)
-            lora_B = torch.nn.Parameter(lora_keys[key_B].to(_dev), requires_grad=False)
-            proj.register_parameter("lora_A", lora_A)
-            proj.register_parameter("lora_B", lora_B)
-
-            def make_hook(A, B):
-                def hook(module, input, output):
-                    x = input[0]
-                    delta = torch.nn.functional.linear(x, B @ A) * scaling
-                    return output + delta
-                return hook
-
-            hooks.append(proj.register_forward_hook(make_hook(lora_A, lora_B)))
+        # FFN LoRA (lora_ffn ablation: gate_proj, up_proj, down_proj)
+        for proj_name in ("gate_proj", "up_proj", "down_proj"):
+            if not hasattr(layer.mlp, proj_name):
+                continue
+            key_A = f"model.language_model.layers.{layer_idx}.mlp.{proj_name}.lora_A"
+            key_B = f"model.language_model.layers.{layer_idx}.mlp.{proj_name}.lora_B"
+            if key_A not in lora_keys or key_B not in lora_keys:
+                continue
+            _register(getattr(layer.mlp, proj_name), key_A, key_B)
 
     print(f"[lora] Applied {len(hooks)} LoRA hooks from checkpoint.")
     return hooks
