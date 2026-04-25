@@ -224,6 +224,45 @@ else:
 EOF
 }
 
+run_ewc_domain() {
+    local domain=$1
+    local prev_domain=$2
+    
+    set_step "train/ewc/$domain"
+    log "START $CURRENT_STEP"
+    start_status_renderer
+    python train.py \
+        --condition ewc \
+        --domain $domain \
+        --ewc_samples 512 \
+        --out_dir ./checkpoints/ewc_canon/${domain} \
+        ${prev_domain:+--ewc_state ./checkpoints/ewc_canon/${prev_domain}/fisher.pt} \
+        --max_steps "$STEPS" \
+        ${prev_domain:+--start_from ./checkpoints/ewc_canon/${prev_domain}} 2>&1 | tee -a "$LOG"
+    stop_status_renderer
+    log "DONE  $CURRENT_STEP"
+    
+    # Eval IMMEDIATELY before anything else
+    set_step "eval/ewc_canon_after_$domain"
+    log "START $CURRENT_STEP"
+    start_status_renderer
+    python eval.py \
+        --checkpoint ./checkpoints/ewc_canon/${domain} \
+        --label ewc_canon_after_${domain} \
+        --n_samples "$N_EVAL" \
+        --status_file "$STATUS_FILE" 2>&1 | tee -a "$LOG"
+    stop_status_renderer
+    log "DONE  $CURRENT_STEP"
+    
+    # Save only the Fisher state (~50-200MB), nuke the weights
+    log "Cleaning checkpoint: keeping fisher.pt, removing weights from ewc_canon/${domain}"
+    find ./checkpoints/ewc_canon/${domain}/ \
+        -name "*.safetensors" -o -name "*.bin" | xargs rm -f 2>&1 || true
+    
+    log "Domain ${domain} done. Disk state:"
+    df -h / 2>&1 | tee -a "$LOG"
+}
+
 # ─────────────────────────────────────────────
 log "=============================="
 log "Proteus full experimental run"
@@ -327,24 +366,11 @@ log "=============================="
 # "$(eval_summary)
 # Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
-#log "--- CHAIN: ewc_canon ---"
-#run_train medical    ewc checkpoints/ewc_canon/medical       --max_steps "$STEPS"
-#run_eval  checkpoints/ewc_canon/medical       ewc_canon_after_medical
-
-#run_train legal      ewc checkpoints/ewc_canon/legal         --max_steps "$STEPS" \
-#    --start_from checkpoints/ewc_canon/medical \
-#    --ewc_state checkpoints/ewc_canon/medical/fisher.pt
-#run_eval  checkpoints/ewc_canon/legal         ewc_canon_after_legal
-
-run_train code       ewc checkpoints/ewc_canon/code          --max_steps "$STEPS" \
-    --start_from checkpoints/ewc_canon/legal \
-    --ewc_state checkpoints/ewc_canon/legal/fisher.pt
-run_eval  checkpoints/ewc_canon/code          ewc_canon_after_code
-
-run_train multilingual ewc checkpoints/ewc_canon/multilingual --max_steps "$STEPS" \
-    --start_from checkpoints/ewc_canon/code \
-    --ewc_state checkpoints/ewc_canon/code/fisher.pt
-run_eval  checkpoints/ewc_canon/multilingual  ewc_canon_after_multilingual
+log "--- CHAIN: ewc_canon ---"
+run_ewc_domain medical ""
+run_ewc_domain legal medical
+run_ewc_domain code legal
+run_ewc_domain multilingual code
 
 notify "EWC canonical chain done" \
 "$(eval_summary)

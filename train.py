@@ -267,10 +267,15 @@ def save_ewc_state(fisher, opt_params, path: Path):
     print(f"[ewc] Fisher state saved to {path / 'fisher.pt'}")
 
 
-def load_ewc_state(path: str):
+def load_ewc_state(path: str, device=None):
     state = torch.load(path, map_location="cpu")
-    print(f"[ewc] Loaded Fisher state from {path}")
-    return state["fisher"], state["opt_params"]
+    fisher     = state["fisher"]
+    opt_params = state["opt_params"]
+    if device is not None:
+        fisher     = {k: v.to(device, non_blocking=True) for k, v in fisher.items()}
+        opt_params = {k: v.to(device, non_blocking=True) for k, v in opt_params.items()}
+    print(f"[ewc] Loaded Fisher state from {path} → {device}")
+    return fisher, opt_params
 
 
 class EWCTrainer(Trainer):
@@ -340,15 +345,15 @@ class EWCTrainer(Trainer):
         outputs = model(**inputs)
         loss    = outputs.loss
 
-        if hasattr(self, "ewc_fisher") and self.ewc_fisher is not None:
-            ewc_loss = torch.tensor(0.0, device="cpu")
+        if self.ewc_fisher is not None:
+            device   = loss.device
+            ewc_loss = torch.tensor(0.0, device=device)
             for name, param in model.named_parameters():
                 if param.requires_grad and name in self.ewc_fisher:
-                    fisher_val = self.ewc_fisher[name]   # stays CPU
-                    opt_val    = self.ewc_opt[name]       # stays CPU
-                    ewc_loss  += (fisher_val * (param.cpu() - opt_val) ** 2).sum()
-
-            loss = loss + (self.args.ewc_lambda / 2.0) * ewc_loss.to(loss.device)
+                    f = self.ewc_fisher[name]    # already on GPU after Patch 1+2
+                    o = self.ewc_opt[name]       # already on GPU
+                    ewc_loss = ewc_loss + (f * (param - o).pow(2)).sum()
+            loss = loss + (self.ewc_lambda / 2.0) * ewc_loss
 
         return (loss, outputs) if return_outputs else loss
 
@@ -457,8 +462,9 @@ def setup_ewc_condition(model, args):
     fisher = None
     opt_params = None
     if args.ewc_state:
-        fisher, opt_params = load_ewc_state(args.ewc_state)
-        print(f"[ewc] lambda={args.ewc_lambda}, prior state loaded.")
+        device = next(model.parameters()).device
+        fisher, opt_params = load_ewc_state(args.ewc_state, device=device)
+        print(f"[ewc] lambda={args.ewc_lambda}, prior state loaded to {device}.")
     else:
         print("[ewc] No prior state — first domain, training without penalty.")
     return [], EWCTrainer, fisher, opt_params
