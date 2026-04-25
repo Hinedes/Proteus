@@ -235,7 +235,7 @@ EOF
 run_ewc_domain() {
     local domain=$1
     local prev_domain=$2
-    
+
     set_step "train/ewc/$domain"
     log "START $CURRENT_STEP"
     start_status_renderer
@@ -244,6 +244,7 @@ run_ewc_domain() {
         --domain $domain \
         --batch_size 16 \
         --grad_accum 1 \
+        --gradient_checkpointing \
         --ewc_samples 128 \
         --out_dir ./checkpoints/ewc_canon/${domain} \
         ${prev_domain:+--ewc_state ./checkpoints/ewc_canon/${prev_domain}/fisher.pt} \
@@ -251,7 +252,7 @@ run_ewc_domain() {
         ${prev_domain:+--start_from ./checkpoints/ewc_canon/${prev_domain}} 2>&1 | tee -a "$LOG"
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
-    
+
     # Eval IMMEDIATELY before anything else
     set_step "eval/ewc_canon_after_$domain"
     log "START $CURRENT_STEP"
@@ -263,12 +264,11 @@ run_ewc_domain() {
         --status_file "$STATUS_FILE" 2>&1 | tee -a "$LOG"
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
-    
-    # Save only the Fisher pkl (~50-200MB), nuke the weights
+
     log "Cleaning checkpoint: keeping fisher.pt, removing weights from ewc_canon/${domain}"
     #find ./checkpoints/ewc_canon/${domain}/ \
     #    -name "*.safetensors" -o -name "*.bin" | xargs rm -f 2>&1 || true
-    
+
     log "Domain ${domain} done. Disk state:"
     df -h / 2>&1 | tee -a "$LOG"
 }
@@ -294,38 +294,17 @@ log "Proteus full experimental run"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
-# ── TunableOp warmup disabled ────────────────────────────────────────────────
-# TunableOp variables and warmup pass are intentionally disabled.
-
 notify "Proteus full run started" \
-"Sections: Extended 4k | Canonical chains | Attention sweeps
+"Sections: EWC canon rerun | Replay canon
 Topic: $NTFY_TOPIC" "default" "rocket"
 
 
 # ══════════════════════════════════════════════
-# SECTION 1: Extended Medical→Legal (4000 steps)
+# SECTION 1: Extended Medical→Legal — DONE, skip
 # ══════════════════════════════════════════════
 log "=============================="
-log "SECTION 1: Extended 4k Medical→Legal"
+log "SECTION 1: Extended 4k Medical→Legal — SKIPPED (done)"
 log "=============================="
-
-# run_train medical full     checkpoints/full_4k/medical    --max_steps "$LONG_STEPS"
-# run_eval  checkpoints/full_4k/medical    full_4k_after_medical
-#
-# run_train legal   full     checkpoints/full_4k/legal      --max_steps "$LONG_STEPS" \
-#     --start_from checkpoints/full_4k/medical
-# run_eval  checkpoints/full_4k/legal      full_4k_after_legal
-#
-# run_train medical proteus  checkpoints/proteus_4k/medical --max_steps "$LONG_STEPS"
-# run_eval  checkpoints/proteus_4k/medical proteus_4k_after_medical
-#
-# run_train legal   proteus  checkpoints/proteus_4k/legal   --max_steps "$LONG_STEPS" \
-#     --start_from checkpoints/proteus_4k/medical
-# run_eval  checkpoints/proteus_4k/legal   proteus_4k_after_legal
-#
-# notify "Section 1 done: Extended 4k" \
-# "$(eval_summary)
-# Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
 
 # ══════════════════════════════════════════════
@@ -335,65 +314,15 @@ log "=============================="
 log "SECTION 2: Canonical 4-domain chains (2000 steps)"
 log "=============================="
 
-# log "--- CHAIN: proteus_canon ---"
-# run_train medical    proteus checkpoints/proteus_canon/medical       --max_steps "$STEPS"
-# run_eval  checkpoints/proteus_canon/medical       proteus_canon_after_medical
-#
-# run_train legal      proteus checkpoints/proteus_canon/legal         --max_steps "$STEPS" \
-#     --start_from checkpoints/proteus_canon/medical
-# run_eval  checkpoints/proteus_canon/legal         proteus_canon_after_legal
-#
-# run_train code       proteus checkpoints/proteus_canon/code          --max_steps "$STEPS" \
-#     --start_from checkpoints/proteus_canon/legal
-# run_eval  checkpoints/proteus_canon/code          proteus_canon_after_code
-#
-# run_train multilingual proteus checkpoints/proteus_canon/multilingual --max_steps "$STEPS" \
-#     --start_from checkpoints/proteus_canon/code
-# run_eval  checkpoints/proteus_canon/multilingual  proteus_canon_after_multilingual
-#
-# notify "Proteus canonical chain done" \
-# "$(eval_summary)
-# Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
-#
-# log "--- CHAIN: full_canon ---"
-# run_train medical    full checkpoints/full_canon/medical       --max_steps "$STEPS"
-# run_eval  checkpoints/full_canon/medical       full_canon_after_medical
-#
-# run_train legal      full checkpoints/full_canon/legal         --max_steps "$STEPS" \
-#     --start_from checkpoints/full_canon/medical
-# run_eval  checkpoints/full_canon/legal         full_canon_after_legal
-#
-# run_train code       full checkpoints/full_canon/code          --max_steps "$STEPS" \
-#     --start_from checkpoints/full_canon/legal
-# run_eval  checkpoints/full_canon/code          full_canon_after_code
-#
-# run_train multilingual full checkpoints/full_canon/multilingual --max_steps "$STEPS" \
-#     --start_from checkpoints/full_canon/code
-# run_eval  checkpoints/full_canon/multilingual  full_canon_after_multilingual
-#
-# log "--- CHAIN: lora_canon ---"
-# run_train medical    lora checkpoints/lora_canon/medical       --max_steps "$STEPS"
-# run_eval  checkpoints/lora_canon/medical       lora_canon_after_medical
-#
-# run_train legal      lora checkpoints/lora_canon/legal         --max_steps "$STEPS" \
-#     --start_from checkpoints/lora_canon/medical
-# run_eval  checkpoints/lora_canon/legal         lora_canon_after_legal
-#
-# run_train code       lora checkpoints/lora_canon/code          --max_steps "$STEPS" \
-#     --start_from checkpoints/lora_canon/legal
-# run_eval  checkpoints/lora_canon/code          lora_canon_after_code
-#
-# run_train multilingual lora checkpoints/lora_canon/multilingual --max_steps "$STEPS" \
-#     --start_from checkpoints/lora_canon/code
-# run_eval  checkpoints/lora_canon/multilingual  lora_canon_after_multilingual
-#
-# notify "LoRA canonical chain done" \
-# "$(eval_summary)
-# Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+# proteus_canon, full_canon, lora_canon — DONE, skip
+# log "--- CHAIN: proteus_canon ---"   # DONE
+# log "--- CHAIN: full_canon ---"       # DONE
+# log "--- CHAIN: lora_canon ---"       # DONE
 
 log "--- CHAIN: ewc_canon ---"
+# medical DONE — checkpoint + fisher.pt intact at checkpoints/ewc_canon/medical/
 #run_ewc_domain medical ""
-#run_ewc_domain legal medical
+run_ewc_domain legal medical
 run_ewc_domain code legal
 run_ewc_domain multilingual code
 
@@ -426,58 +355,20 @@ run_train multilingual replay checkpoints/replay_canon/multilingual --max_steps 
     --replay_buffer data/replay_buffer.jsonl
 run_eval  checkpoints/replay_canon/multilingual  replay_canon_after_multilingual
 
-notify "Section 2 done: Canonical chains" \
+notify "Section 2 done: EWC + Replay canonical chains" \
 "$(eval_summary)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
 
 # ══════════════════════════════════════════════
-# SECTION 3: Attention sweeps (5a and 5c)
+# SECTION 3: Attention sweeps — DONE, skip
 # ══════════════════════════════════════════════
 log "=============================="
-log "SECTION 3: Attention sweeps"
+log "SECTION 3: Attention sweeps — SKIPPED (done)"
 log "=============================="
 
-log "--- CHAIN: proteus_attn_freeze (5a) ---"
-run_train medical    proteus checkpoints/proteus_attn_freeze/medical       --max_steps "$STEPS" --attention freeze
-run_eval  checkpoints/proteus_attn_freeze/medical       proteus_freeze_after_medical
-
-run_train legal      proteus checkpoints/proteus_attn_freeze/legal         --max_steps "$STEPS" --attention freeze \
-    --start_from checkpoints/proteus_attn_freeze/medical
-run_eval  checkpoints/proteus_attn_freeze/legal         proteus_freeze_after_legal
-
-run_train code       proteus checkpoints/proteus_attn_freeze/code          --max_steps "$STEPS" --attention freeze \
-    --start_from checkpoints/proteus_attn_freeze/legal
-run_eval  checkpoints/proteus_attn_freeze/code          proteus_freeze_after_code
-
-run_train multilingual proteus checkpoints/proteus_attn_freeze/multilingual --max_steps "$STEPS" --attention freeze \
-    --start_from checkpoints/proteus_attn_freeze/code
-run_eval  checkpoints/proteus_attn_freeze/multilingual  proteus_freeze_after_multilingual
-
-notify "5a done: attn_freeze" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
-
-log "--- CHAIN: proteus_attn_diagonal (5c) ---"
-run_train medical    proteus checkpoints/proteus_attn_diagonal/medical       --max_steps "$STEPS" --attention diagonal
-run_eval  checkpoints/proteus_attn_diagonal/medical       proteus_diagonal_after_medical
-
-run_train legal      proteus checkpoints/proteus_attn_diagonal/legal         --max_steps "$STEPS" --attention diagonal \
-    --start_from checkpoints/proteus_attn_diagonal/medical
-run_eval  checkpoints/proteus_attn_diagonal/legal         proteus_diagonal_after_legal
-
-run_train code       proteus checkpoints/proteus_attn_diagonal/code          --max_steps "$STEPS" --attention diagonal \
-    --start_from checkpoints/proteus_attn_diagonal/legal
-run_eval  checkpoints/proteus_attn_diagonal/code          proteus_diagonal_after_code
-
-run_train multilingual proteus checkpoints/proteus_attn_diagonal/multilingual --max_steps "$STEPS" --attention diagonal \
-    --start_from checkpoints/proteus_attn_diagonal/code
-run_eval  checkpoints/proteus_attn_diagonal/multilingual  proteus_diagonal_after_multilingual
-
-notify "Section 3 done: Attention sweeps" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
-
+# 5a (proteus_attn_freeze) — DONE, all 4 domains complete
+# 5c (proteus_attn_diagonal) — DONE, all 4 domains complete
 
 # ─────────────────────────────────────────────
 log "=============================="
@@ -486,7 +377,7 @@ log "Elapsed: $(elapsed_str) | Total spend: $(credit_used)"
 log "=============================="
 
 notify "Proteus COMPLETE" \
-"All 3 sections done.
+"EWC + Replay canonical chains done.
 Elapsed: $(elapsed_str) | Total: $(credit_used)
 
 $(eval_summary)" "high" "checkered_flag"
