@@ -266,8 +266,8 @@ run_ewc_domain() {
     
     # Save only the Fisher pkl (~50-200MB), nuke the weights
     log "Cleaning checkpoint: keeping fisher.pt, removing weights from ewc_canon/${domain}"
-    find ./checkpoints/ewc_canon/${domain}/ \
-        -name "*.safetensors" -o -name "*.bin" | xargs rm -f 2>&1 || true
+    #find ./checkpoints/ewc_canon/${domain}/ \
+    #    -name "*.safetensors" -o -name "*.bin" | xargs rm -f 2>&1 || true
     
     log "Domain ${domain} done. Disk state:"
     df -h / 2>&1 | tee -a "$LOG"
