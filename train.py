@@ -319,6 +319,7 @@ class EWCTrainer(Trainer):
         self.model_accepts_loss_kwargs = False
 
         self._ewc_enabled = fisher is not None and opt_params is not None
+        print(f"[ewc] EWCTrainer init: _ewc_enabled={self._ewc_enabled}, lambda={ewc_lambda}")
         self._fisher_dict = fisher or {}
         self._opt_params_dict = opt_params or {}
         self._p_list = []
@@ -776,12 +777,13 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    _local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     _model_source = args.start_from if args.start_from else MODEL_ID
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         _model_source,
         torch_dtype=torch.bfloat16,
-        device_map="cuda",
+        device_map={"" : _local_rank},
         trust_remote_code=True,
         attn_implementation="sdpa",
     )
@@ -858,6 +860,8 @@ def main():
             opt_params  = opt_params,
         )
 
+    _rank = int(os.environ.get("RANK", "0"))
+
     trainer = trainer_class(**trainer_kwargs)
     trainer.add_callback(
         TrainStatusCallback(
@@ -899,7 +903,7 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-        if args.condition == "ewc":
+        if args.condition == "ewc" and _rank == 0:
             print("[ewc] Computing Fisher matrix for next domain...")
             new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
             save_ewc_state(new_fisher, new_opt, out_dir)
