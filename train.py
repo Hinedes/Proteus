@@ -315,81 +315,115 @@ def load_ewc_state(path: str, device=None):
 
 
 class EWCTrainer(Trainer):
-    """Trainer that adds EWC penalty to the standard cross-entropy loss.
+    """Trainer that applies EWC as a post-backward gradient penalty.
 
-    VRAM-efficient: Fisher and optimal params are stored as flattened 1D BF16
-    tensors in CPU pinned memory. They are transferred to GPU once per backward
-    pass via non_blocking H2D copy, avoiding the ~32GB GPU footprint of the
-    per-parameter approach.
-
-    Penalty computation uses parameters_to_vector for a single fused GPU kernel
-    instead of 400+ individual kernel launches per step.
+    This keeps the EWC math identical (grad += lambda * F * (theta - theta*))
+    but avoids building a massive EWC autograd graph inside compute_loss.
+    On large models this reduces peak VRAM and improves step throughput.
     """
 
     def __init__(self, *args, ewc_lambda=5000.0, fisher=None, opt_params=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.ewc_lambda       = ewc_lambda
-        self.args.ewc_lambda  = ewc_lambda
-        self.ewc_fisher       = fisher
-        self.ewc_opt          = opt_params
-        self._fisher_dict     = fisher      # {name: tensor} on CPU, freed after build
-        self._opt_params_dict = opt_params  # {name: tensor} on CPU, freed after build
-        self._fisher_flat_cpu = None        # 1D BF16 pinned CPU tensor
-        self._opt_flat_cpu    = None        # 1D BF16 pinned CPU tensor
-        self._tracked_params  = None        # [param_ref, ...] live GPU params
-        self._built           = False
+        self.ewc_lambda = ewc_lambda
+        self.args.ewc_lambda = ewc_lambda
 
-    def _build_pairs(self, model):
-        """Flatten Fisher and optimal params into pinned CPU 1D BF16 tensors.
+        # We don't use num_items_in_batch in this custom compute_loss.
+        self.model_accepts_loss_kwargs = False
 
-        GPU VRAM cost: zero. CPU RAM cost: ~2 * n_params * 2 bytes (BF16).
-        For Gemma 4 E4B: ~2 * 4B * 2 = ~16 GB in CPU RAM.
-        Transfer cost per step: ~16 GB over PCIe (~320 ms at 50 GB/s effective).
-        """
-        from torch.nn.utils import parameters_to_vector
+        self._ewc_enabled = fisher is not None and opt_params is not None
+        self._fisher_dict = fisher or {}
+        self._opt_params_dict = opt_params or {}
+        self._p_list = []
+        self._f_list = []
+        self._o_list = []
+        self._built = False
+        self._chunk_size = 32
+
+    def _build_penalty_cache(self, model):
+        """Build aligned parameter/Fisher/optimum lists once for fast foreach ops."""
+        if self._built or not self._ewc_enabled:
+            return
 
         param_dict = dict(model.named_parameters())
-        tracked_params  = []
-        fisher_chunks   = []
-        opt_chunks      = []
+        tracked_numel = 0
 
-        for n in self._fisher_dict:
-            if n in param_dict:
-                tracked_params.append(param_dict[n])
-                fisher_chunks.append(self._fisher_dict[n].cpu().bfloat16().flatten())
-                opt_chunks.append(self._opt_params_dict[n].cpu().bfloat16().flatten())
+        for name, fisher_tensor in self._fisher_dict.items():
+            param = param_dict.get(name)
+            opt_tensor = self._opt_params_dict.get(name)
 
-        self._tracked_params  = tracked_params
-        self._fisher_flat_cpu = torch.cat(fisher_chunks).pin_memory()
-        self._opt_flat_cpu    = torch.cat(opt_chunks).pin_memory()
+            if param is None or opt_tensor is None or not param.requires_grad:
+                continue
 
-        n_tracked = self._fisher_flat_cpu.numel()
-        cpu_gb    = n_tracked * 2 * 2 / 1e9  # BF16 * 2 tensors
+            self._p_list.append(param)
+            self._f_list.append(fisher_tensor.to(param.device, dtype=param.dtype, non_blocking=True))
+            self._o_list.append(opt_tensor.to(param.device, dtype=param.dtype, non_blocking=True))
+            tracked_numel += param.numel()
 
-        self._built           = True
-        self._fisher_dict     = None   # free original dicts
-        self._opt_params_dict = None
+        self._fisher_dict = {}
+        self._opt_params_dict = {}
+        self._built = True
 
+        if not self._p_list:
+            self._ewc_enabled = False
+            print("[ewc] WARNING: no matching trainable parameters found for EWC; disabling penalty.")
+            return
+
+        state_gb = tracked_numel * self._f_list[0].element_size() * 2 / 1e9
         print(
-            f"[ewc] EWC state built: {n_tracked:,} params tracked across "
-            f"{len(tracked_params)} tensors.\n"
-            f"[ewc] Storage: CPU pinned RAM ({cpu_gb:.2f} GB BF16). "
-            f"GPU VRAM cost: 0 GB."
+            f"[ewc] Grad-penalty cache built: {tracked_numel:,} params across "
+            f"{len(self._p_list)} tensors (~{state_gb:.2f} GB EWC state on-device)."
         )
 
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        outputs = model(**inputs)
-        loss    = outputs.loss
+    def _apply_ewc_grad_penalty(self):
+        if not self._ewc_enabled or not self._built:
+            return
 
-        if self.ewc_fisher is not None:
-            device   = loss.device
-            ewc_loss = torch.tensor(0.0, device=device)
-            for name, param in model.named_parameters():
-                if param.requires_grad and name in self.ewc_fisher:
-                    f = self.ewc_fisher[name]    # already on GPU after Patch 1+2
-                    o = self.ewc_opt[name]       # already on GPU
-                    ewc_loss = ewc_loss + (f * (param - o).pow(2)).sum()
-            loss = loss + (self.ewc_lambda / 2.0) * ewc_loss
+        alpha = self.ewc_lambda
+        if self.current_gradient_accumulation_steps > 1:
+            alpha = alpha / float(self.current_gradient_accumulation_steps)
+
+        with torch.no_grad():
+            for start in range(0, len(self._p_list), self._chunk_size):
+                p_chunk = []
+                g_chunk = []
+                f_chunk = []
+                o_chunk = []
+
+                for idx in range(start, min(start + self._chunk_size, len(self._p_list))):
+                    param = self._p_list[idx]
+                    if param.grad is None:
+                        continue
+                    p_chunk.append(param)
+                    g_chunk.append(param.grad)
+                    f_chunk.append(self._f_list[idx])
+                    o_chunk.append(self._o_list[idx])
+
+                if not p_chunk:
+                    continue
+
+                try:
+                    # diffs = (theta - theta*), then multiply by Fisher in-place.
+                    diffs = torch._foreach_sub(p_chunk, o_chunk)
+                    torch._foreach_mul_(diffs, f_chunk)
+                    torch._foreach_add_(g_chunk, diffs, alpha=alpha)
+                except RuntimeError:
+                    # Conservative fallback for unsupported foreach paths.
+                    for p, g, f, o in zip(p_chunk, g_chunk, f_chunk, o_chunk):
+                        g.add_(f * (p - o), alpha=alpha)
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+
+        if self._ewc_enabled:
+            if not self._built:
+                self._build_penalty_cache(model)
+            self._apply_ewc_grad_penalty()
+
+        return loss
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        outputs = model(**inputs)
+        loss = outputs.loss
 
         return (loss, outputs) if return_outputs else loss
 
