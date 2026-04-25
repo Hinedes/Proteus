@@ -185,41 +185,6 @@ else:
 EOF
 }
 
-run_ewc_domain() {
-    local domain=$1
-    local prev_domain=$2
-
-    set_step "train/ewc/$domain"
-    log "START $CURRENT_STEP"
-    start_status_renderer
-    python train.py \
-        --condition ewc \
-        --domain $domain \
-        --batch_size 16 \
-        --grad_accum 1 \
-        --ewc_samples 128 \
-        --out_dir ./checkpoints/ewc_canon/${domain} \
-        ${prev_domain:+--ewc_state ./checkpoints/ewc_canon/${prev_domain}/fisher.pt} \
-        --max_steps "$STEPS" \
-        ${prev_domain:+--start_from ./checkpoints/ewc_canon/${prev_domain}} 2>&1 | tee -a "$LOG"
-    stop_status_renderer
-    log "DONE  $CURRENT_STEP"
-
-    set_step "eval/ewc_canon_after_$domain"
-    log "START $CURRENT_STEP"
-    start_status_renderer
-    python eval.py \
-        --checkpoint ./checkpoints/ewc_canon/${domain} \
-        --label ewc_canon_after_${domain} \
-        --n_samples "$N_EVAL" \
-        --status_file "$STATUS_FILE" 2>&1 | tee -a "$LOG"
-    stop_status_renderer
-    log "DONE  $CURRENT_STEP"
-
-    log "Domain ${domain} done. Disk state:"
-    df -h / 2>&1 | tee -a "$LOG"
-}
-
 # ── Kill stale processes and free VRAM ───────────────────────────────────────
 log "Cleaning up stale Python processes..."
 for pid in $(pgrep -f "python train.py" 2>/dev/null); do
@@ -234,65 +199,44 @@ rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
 # ─────────────────────────────────────────────────────────────────────────────
 
 log "=============================="
-log "Proteus — EWC + Replay rerun"
+log "Proteus — LoRA-FFN ablation"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
-notify "Proteus EWC+Replay rerun started" "Topic: $NTFY_TOPIC" "default" "rocket"
+notify "LoRA-FFN ablation started" "Topic: $NTFY_TOPIC" "default" "rocket"
 
 # ══════════════════════════════════════════════
-# EWC canonical chain (full rerun — medical weights were lost)
+# LoRA-FFN: 4-domain canonical chain
+# Same location as Proteus (gate/up/down proj), low-rank mechanism
 # ══════════════════════════════════════════════
-log "--- CHAIN: ewc_canon ---"
-run_ewc_domain medical ""
-run_ewc_domain legal medical
-run_ewc_domain code legal
-run_ewc_domain multilingual code
+log "--- CHAIN: lora_ffn_canon ---"
 
-notify "EWC canonical chain done" \
+run_train medical lora_ffn checkpoints/lora_ffn_canon/medical --max_steps "$STEPS"
+run_eval  checkpoints/lora_ffn_canon/medical lora_ffn_canon_after_medical
+
+run_train legal lora_ffn checkpoints/lora_ffn_canon/legal --max_steps "$STEPS" \
+    --start_from checkpoints/lora_ffn_canon/medical
+run_eval  checkpoints/lora_ffn_canon/legal lora_ffn_canon_after_legal
+
+run_train code lora_ffn checkpoints/lora_ffn_canon/code --max_steps "$STEPS" \
+    --start_from checkpoints/lora_ffn_canon/legal
+run_eval  checkpoints/lora_ffn_canon/code lora_ffn_canon_after_code
+
+run_train multilingual lora_ffn checkpoints/lora_ffn_canon/multilingual --max_steps "$STEPS" \
+    --start_from checkpoints/lora_ffn_canon/code
+run_eval  checkpoints/lora_ffn_canon/multilingual lora_ffn_canon_after_multilingual
+
+notify "LoRA-FFN chain done" \
 "$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
-
-# ══════════════════════════════════════════════
-# Replay canonical chain
-# ══════════════════════════════════════════════
-log "--- CHAIN: replay_canon ---"
-run_train medical replay checkpoints/replay_canon/medical --max_steps "$STEPS"
-run_eval  checkpoints/replay_canon/medical replay_canon_after_medical
-log "Building replay buffer from medical..."
-python build_replay_buffer.py --domain medical 2>&1 | tee -a "$LOG"
-
-run_train legal replay checkpoints/replay_canon/legal --max_steps "$STEPS" \
-    --start_from checkpoints/replay_canon/medical \
-    --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_canon/legal replay_canon_after_legal
-log "Building replay buffer: appending legal..."
-python build_replay_buffer.py --domain legal 2>&1 | tee -a "$LOG"
-
-run_train code replay checkpoints/replay_canon/code --max_steps "$STEPS" \
-    --start_from checkpoints/replay_canon/legal \
-    --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_canon/code replay_canon_after_code
-log "Building replay buffer: appending code..."
-python build_replay_buffer.py --domain code 2>&1 | tee -a "$LOG"
-
-run_train multilingual replay checkpoints/replay_canon/multilingual --max_steps "$STEPS" \
-    --start_from checkpoints/replay_canon/code \
-    --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_canon/multilingual replay_canon_after_multilingual
-
-notify "Replay canonical chain done" \
-"$(eval_summary)
-Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
+Elapsed: $(elapsed_str) | Spent: $(credit_used)" "high" "white_check_mark"
 
 # ─────────────────────────────────────────────
 log "=============================="
 log "All done. Elapsed: $(elapsed_str) | Total spend: $(credit_used)"
 log "=============================="
 
-notify "Proteus COMPLETE" \
-"EWC + Replay done.
-Elapsed: $(elapsed_str) | Total: $(credit_used)
+notify "LoRA-FFN COMPLETE" \
+"Elapsed: $(elapsed_str) | Total: $(credit_used)
 
 $(eval_summary)" "high" "checkered_flag"
 

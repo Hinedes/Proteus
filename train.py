@@ -5,7 +5,8 @@ Trains Gemma 4 E4B on one domain under a specified condition.
 Conditions:
   proteus   — Core frozen via gradient hook (the thesis)
   full      — Full fine-tune, no protection
-  lora      — LoRA adapters only, base model frozen entirely
+  lora      — LoRA adapters on attention (q_proj, v_proj) — standard baseline
+  lora_ffn  — LoRA adapters on FFN (gate/up/down proj) — same location as Proteus
   ewc       — Elastic Weight Consolidation (importance-weighted regularization)
   replay    — Data replay from previous domains
 
@@ -13,6 +14,7 @@ Usage:
   python train.py --domain medical --condition proteus
   python train.py --domain legal   --condition full   --max_steps 200
   python train.py --domain code    --condition lora
+  python train.py --domain code    --condition lora_ffn
   python train.py --domain code    --condition proteus --compile
 
   # EWC: first domain needs no prior state; subsequent domains load it
@@ -89,7 +91,6 @@ class StatusWriter:
                 json.dump(data, f)
             os.replace(tmp_path, self.path)
         except Exception:
-            # Never let status I/O interfere with training.
             pass
 
 
@@ -204,7 +205,6 @@ def apply_aiter_optimizations(model):
             def forward(hidden_states):
                 gate = original_mlp.gate_proj(hidden_states)
                 up   = original_mlp.up_proj(hidden_states)
-                # silu_and_mul(out, x): x = [B, T, 2*d], out = [B, T, d]
                 fused_input = torch.cat([gate, up], dim=-1)
                 activated   = torch.empty_like(gate)
                 _aiter.silu_and_mul(activated, fused_input)
@@ -250,11 +250,6 @@ def register_hooks(model):
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
 def compute_fisher(model, dataset, n_samples=200, batch_size=16):
-    """
-    Diagonal Fisher estimate via squared gradients on a sample of the dataset.
-    Batched: processes batch_size samples per backward pass instead of 1.
-    Returns {param_name: fisher_diagonal_tensor}.
-    """
     model.eval()
     fisher     = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
     opt_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
@@ -315,19 +310,12 @@ def load_ewc_state(path: str, device=None):
 
 
 class EWCTrainer(Trainer):
-    """Trainer that applies EWC as a post-backward gradient penalty.
-
-    This keeps the EWC math identical (grad += lambda * F * (theta - theta*))
-    but avoids building a massive EWC autograd graph inside compute_loss.
-    On large models this reduces peak VRAM and improves step throughput.
-    """
+    """Trainer that applies EWC as a post-backward gradient penalty."""
 
     def __init__(self, *args, ewc_lambda=5000.0, fisher=None, opt_params=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.ewc_lambda = ewc_lambda
         self.args.ewc_lambda = ewc_lambda
-
-        # We don't use num_items_in_batch in this custom compute_loss.
         self.model_accepts_loss_kwargs = False
 
         self._ewc_enabled = fisher is not None and opt_params is not None
@@ -340,7 +328,6 @@ class EWCTrainer(Trainer):
         self._chunk_size = 32
 
     def _build_penalty_cache(self, model):
-        """Build aligned parameter/Fisher/optimum lists once for fast foreach ops."""
         if self._built or not self._ewc_enabled:
             return
 
@@ -402,12 +389,10 @@ class EWCTrainer(Trainer):
                     continue
 
                 try:
-                    # diffs = (theta - theta*), then multiply by Fisher in-place.
                     diffs = torch._foreach_sub(p_chunk, o_chunk)
                     torch._foreach_mul_(diffs, f_chunk)
                     torch._foreach_add_(g_chunk, diffs, alpha=alpha)
                 except RuntimeError:
-                    # Conservative fallback for unsupported foreach paths.
                     for p, g, f, o in zip(p_chunk, g_chunk, f_chunk, o_chunk):
                         g.add_(f * (p - o), alpha=alpha)
 
@@ -424,7 +409,6 @@ class EWCTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         outputs = model(**inputs)
         loss = outputs.loss
-
         return (loss, outputs) if return_outputs else loss
 
 
@@ -434,7 +418,6 @@ def apply_proteus_attention_strategy(model, attention_mode: str):
     n_layers = len(layers)
 
     if attention_mode == "freeze":
-        # Condition 5a: freeze all attention across all layers
         for layer in layers:
             for name in attn_modules:
                 m = getattr(layer.self_attn, name, None)
@@ -442,7 +425,6 @@ def apply_proteus_attention_strategy(model, attention_mode: str):
                     m.weight.requires_grad_(False)
         print(f"[proteus] Attention: all {n_layers} layers frozen (5a).")
     elif attention_mode == "diagonal":
-        # Condition 5c: freeze bottom half, train top half
         freeze_up_to = n_layers // 2
         for i, layer in enumerate(layers):
             for name in attn_modules:
@@ -455,7 +437,7 @@ def apply_proteus_attention_strategy(model, attention_mode: str):
 
 
 def register_lora_fast_hooks(model, r=64, alpha=128, dropout_p=0.05):
-    """Register fast hook-based LoRA on q_proj/v_proj across all transformer layers."""
+    """LoRA on attention (q_proj, v_proj) — standard baseline."""
     import math
 
     for p in model.parameters():
@@ -495,13 +477,79 @@ def register_lora_fast_hooks(model, r=64, alpha=128, dropout_p=0.05):
                     x = input[0]
                     delta = torch.nn.functional.linear(d(x), B @ A) * scaling
                     return output + delta
-
                 return hook
 
             lora_hooks.append(
                 proj.register_forward_hook(make_hook(lora_A, lora_B, drop))
             )
 
+    return lora_hooks, lora_params
+
+
+def register_lora_ffn_hooks(model, r=64, alpha=128, dropout_p=0.05):
+    """
+    LoRA on FFN (gate_proj, up_proj, down_proj) — same location as Proteus.
+
+    This ablation isolates mechanism from location. Both Proteus and LoRA-FFN
+    operate on the FFN weight matrices. Proteus does full-rank updates restricted
+    to the outer zone. LoRA-FFN does low-rank updates (rank r) to the full FFN
+    weight matrix. The comparison answers: given the same location, does
+    structured full-rank plasticity (Proteus) outperform low-rank adaptation (LoRA)?
+
+    Rank is matched to the attention LoRA (r=64) for comparable parameter budgets.
+    Note: FFN matrices are larger (gate/up: [10240, 2560], down: [2560, 10240]),
+    so total LoRA-FFN parameter count is higher. This is noted in the paper.
+    """
+    import math
+
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    lora_params = []
+    lora_hooks  = []
+    layers  = model.model.language_model.layers
+    scaling = alpha / r
+    _device = next(model.parameters()).device
+
+    for layer in layers:
+        mlp = layer.mlp
+        for proj_name in ("gate_proj", "up_proj", "down_proj"):
+            proj = getattr(mlp, proj_name, None)
+            if proj is None:
+                continue
+
+            in_f  = proj.in_features
+            out_f = proj.out_features
+
+            lora_A = torch.nn.Parameter(
+                torch.empty(r, in_f, dtype=torch.bfloat16, device=_device)
+            )
+            lora_B = torch.nn.Parameter(
+                torch.zeros(out_f, r, dtype=torch.bfloat16, device=_device)
+            )
+            torch.nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
+
+            proj.register_parameter("lora_A", lora_A)
+            proj.register_parameter("lora_B", lora_B)
+            lora_params.extend([lora_A, lora_B])
+
+            drop = torch.nn.Dropout(dropout_p)
+
+            def make_hook(A, B, d):
+                def hook(module, input, output):
+                    x = input[0]
+                    delta = torch.nn.functional.linear(d(x), B @ A) * scaling
+                    return output + delta
+                return hook
+
+            lora_hooks.append(
+                proj.register_forward_hook(make_hook(lora_A, lora_B, drop))
+            )
+
+    trainable = sum(p.numel() for p in lora_params)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"[lora_ffn] Registered {len(lora_hooks)} forward hooks on FFN (gate/up/down).")
+    print(f"[lora_ffn] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
     return lora_hooks, lora_params
 
 
@@ -522,8 +570,13 @@ def setup_lora_condition(model, args):
     lora_hooks, lora_params = register_lora_fast_hooks(model)
     trainable = sum(p.numel() for p in lora_params)
     total     = sum(p.numel() for p in model.parameters())
-    print(f"[lora] Registered {len(lora_hooks)} forward hooks (fast path).")
+    print(f"[lora] Registered {len(lora_hooks)} forward hooks (attention: q/v).")
     print(f"[lora] Trainable: {trainable:,} / {total:,} ({100*trainable/total:.4f}%)")
+    return [], Trainer, None, None
+
+
+def setup_lora_ffn_condition(model, args):
+    lora_hooks, lora_params = register_lora_ffn_hooks(model)
     return [], Trainer, None, None
 
 
@@ -550,11 +603,12 @@ def setup_replay_condition(model, args):
 
 def setup_training_condition(model, args):
     handlers = {
-        "proteus": setup_proteus_condition,
-        "full": setup_full_condition,
-        "lora": setup_lora_condition,
-        "ewc": setup_ewc_condition,
-        "replay": setup_replay_condition,
+        "proteus":  setup_proteus_condition,
+        "full":     setup_full_condition,
+        "lora":     setup_lora_condition,
+        "lora_ffn": setup_lora_ffn_condition,
+        "ewc":      setup_ewc_condition,
+        "replay":   setup_replay_condition,
     }
     return handlers[args.condition](model, args)
 
@@ -609,7 +663,6 @@ RESPONSE_KEY = "### Response:\n"
 
 
 def format_prompt_parts(row: dict) -> tuple[str, str]:
-    """Returns (prompt_prefix, response_text) separately for label masking."""
     instruction = row["instruction"]
     inp         = row.get("input", "").strip()
     output      = row["output"]
@@ -640,7 +693,6 @@ def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
                 "output":      batch["output"][i],
             })
 
-            # Tokenize prefix and full sequence separately to find boundary
             prefix_ids = tokenizer(
                 prefix,
                 truncation=False,
@@ -654,11 +706,6 @@ def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
                 add_special_tokens=True,
             )["input_ids"]
 
-            # Mask prompt tokens with -100 so loss is only on response
-            # Guard: ensure at least 1 valid label token survives truncation.
-            # Without this, long-prefix datasets (e.g. legal) produce sequences
-            # where prefix alone exceeds MAX_LENGTH, masking all labels to -100
-            # and causing NaN loss that poisons the optimizer state.
             n_prefix = min(len(prefix_ids), len(full_ids) - 1)
             labels   = [-100] * n_prefix + full_ids[n_prefix:]
 
@@ -679,40 +726,23 @@ def main():
     parser.add_argument("--domain",       required=True,
                         choices=["medical", "legal", "code", "multilingual"])
     parser.add_argument("--condition",    required=True,
-                        choices=["proteus", "full", "lora", "ewc", "replay"])
-    parser.add_argument("--start_from",   type=str, default=None,
-                        help="Load weights from this checkpoint instead of base MODEL_ID. "
-                             "Used for sequential multi-domain chains.")
+                        choices=["proteus", "full", "lora", "lora_ffn", "ewc", "replay"])
+    parser.add_argument("--start_from",   type=str, default=None)
     parser.add_argument("--max_steps",    type=int,   default=500)
     parser.add_argument("--batch_size",   type=int,   default=2)
     parser.add_argument("--grad_accum",   type=int,   default=8)
     parser.add_argument("--lr",           type=float, default=2e-5)
-    parser.add_argument("--ewc_lambda",   type=float, default=5000.0,
-                        help="EWC regularization strength.")
-    parser.add_argument("--ewc_state",    type=str,   default=None,
-                        help="Path to fisher.pt from previous domain (EWC only).")
-    parser.add_argument("--ewc_samples",  type=int,   default=200,
-                        help="Samples used to estimate Fisher diagonal.")
-    parser.add_argument("--replay_buffer",type=str,   default=None,
-                        help="Path to .jsonl replay buffer (Replay only).")
-    parser.add_argument("--replay_ratio", type=float, default=0.3,
-                        help="Fraction of each batch drawn from replay buffer.")
+    parser.add_argument("--ewc_lambda",   type=float, default=5000.0)
+    parser.add_argument("--ewc_state",    type=str,   default=None)
+    parser.add_argument("--ewc_samples",  type=int,   default=200)
+    parser.add_argument("--replay_buffer",type=str,   default=None)
+    parser.add_argument("--replay_ratio", type=float, default=0.3)
     parser.add_argument("--attention",    type=str,   default="train",
-                        choices=["train", "freeze", "diagonal"],
-                        help=(
-                            "Attention strategy for Proteus condition. "
-                            "'train': all attention layers update (default, Condition 5b). "
-                            "'freeze': all attention frozen (Condition 5a). "
-                            "'diagonal': freeze bottom half, train top half (Condition 5c)."
-                        ))
-    parser.add_argument("--compile",      action="store_true",
-                        help="Compile with torch.compile (Triton). ~1-2 min warm-up.")
-    parser.add_argument("--gradient_checkpointing", action="store_true",
-                        help="Recompute activations during backward to save VRAM (~33% slower).")
-    parser.add_argument("--out_dir",      type=str,   default=None,
-                        help="Override output checkpoint directory.")
-    parser.add_argument("--status_file",  type=str,   default=None,
-                        help="Optional JSON status file path for live progress rendering.")
+                        choices=["train", "freeze", "diagonal"])
+    parser.add_argument("--compile",      action="store_true")
+    parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--out_dir",      type=str,   default=None)
+    parser.add_argument("--status_file",  type=str,   default=None)
     args = parser.parse_args()
     try:
         validate_args(args)
@@ -742,12 +772,10 @@ def main():
     print(f"  Compile:   {args.compile}")
     print(f"  Output:    {out_dir}\n")
 
-    # ── Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ── Model
     _model_source = args.start_from if args.start_from else MODEL_ID
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
@@ -769,22 +797,17 @@ def main():
         del model.multi_modal_projector
     torch.cuda.empty_cache()
 
-    # ── aiter MI300X kernel optimizations
     apply_aiter_optimizations(model)
 
-    # ── Condition setup
     hooks, trainer_class, fisher, opt_params = setup_training_condition(model, args)
 
-    # ── Optional Triton compile
     model = maybe_compile_model(model, args.compile)
 
-    # ── Dataset
     print(f"Loading {args.domain} dataset...")
     raw_ds = load_domain(args.domain, split="train")
 
     if args.condition == "replay" and args.replay_buffer:
         replay_records = load_replay_buffer(args.replay_buffer)
-        # Interleave replay samples proportionally
         n_replay = int(len(raw_ds) * args.replay_ratio / (1 - args.replay_ratio))
         n_replay = min(n_replay, len(replay_records))
         sampled  = random.sample(replay_records, n_replay)
@@ -792,19 +815,15 @@ def main():
         print(f"[replay] {len(raw_ds)} current + {n_replay} replay = {len(combined)} total")
         raw_ds = combined
 
-    # Truncate BEFORE tokenization — no point processing 238K samples
-    # when training only runs max_steps * effective_batch
     effective_batch = args.batch_size * args.grad_accum
-    max_samples = args.max_steps * effective_batch * 2  # 2x safety margin
+    max_samples = args.max_steps * effective_batch * 2
     if len(raw_ds) > max_samples:
         print(f"[data] Truncating {len(raw_ds):,} → {max_samples:,} samples (2x needed)")
         raw_ds = raw_ds.select(range(max_samples))
 
     tokenized = tokenize_dataset(raw_ds, tokenizer)
-
     collator  = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True, pad_to_multiple_of=128)
 
-    # ── Training args
     training_args = TrainingArguments(
         output_dir               = str(out_dir),
         max_steps                = args.max_steps,
@@ -817,7 +836,7 @@ def main():
         bf16                     = True,
         optim                    = "adamw_torch_fused",
         logging_steps            = 10,
-        save_strategy            = "no",         # skip intermediate checkpoints (optimizer.pt is ~32GB)
+        save_strategy            = "no",
         report_to                = "none",
         dataloader_num_workers   = 4,
         dataloader_pin_memory    = True,
@@ -826,7 +845,6 @@ def main():
         remove_unused_columns    = True,
     )
 
-    # ── Trainer
     trainer_kwargs = dict(
         model         = model,
         args          = training_args,
@@ -870,21 +888,17 @@ def main():
             "eta_s": 0.0,
         })
 
-        # ── Cleanup hooks before save
         for h in hooks:
             h.remove()
 
         trainer.save_model(str(out_dir))
         tokenizer.save_pretrained(str(out_dir))
 
-        # --- THE FIX: ASSASSINATE THE TRAINER ---
         print("[cleanup] Destroying HF Trainer and freeing optimizer VRAM...")
         del trainer
         gc.collect()
         torch.cuda.empty_cache()
-        # ----------------------------------------
 
-        # ── EWC: compute and save Fisher state for next domain
         if args.condition == "ewc":
             print("[ewc] Computing Fisher matrix for next domain...")
             new_fisher, new_opt = compute_fisher(model, tokenized, n_samples=args.ewc_samples)
