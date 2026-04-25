@@ -66,7 +66,10 @@ run_train_on() {
     local gpus="$1" port="$2" domain="$3" condition="$4" out_dir="$5"
     shift 5
     log "START train/$condition/$domain | GPUs=$gpus"
+    # Set all common GPU visibility vars for ROCm + cross-vendor portability.
     CUDA_VISIBLE_DEVICES="$gpus" \
+    HIP_VISIBLE_DEVICES="$gpus" \
+    ROCR_VISIBLE_DEVICES="$gpus" \
     torchrun --nproc_per_node=$N_GPU --master_port=$port \
         train.py \
         --domain "$domain" --condition "$condition" \
