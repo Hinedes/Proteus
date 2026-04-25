@@ -1,27 +1,8 @@
 #!/bin/bash
 chmod +x "$0"
-# Proteus — Full Experimental Runner
-#
-# Section 1: Extended Medical→Legal (4000 steps, 2 conditions)
-#   Stress-tests forgetting harder. Widens Table 2 gap.
-#   Saves to checkpoints/{condition}_4k/ — does NOT touch canonical checkpoints.
-#
-# Section 2: Canonical 4-domain sequential chains (2000 steps, 2 conditions)
-#   Single clean run for both Proteus and Full. Fixes Table 3 chimera.
-#   Saves to checkpoints/{condition}_canon/ — isolated from prior runs.
-#
-# Section 3: Attention sweeps (2000 steps, 2 variants, 4 domains each)
-#   5a: --attention freeze   → proteus_attn_freeze
-#   5c: --attention diagonal → proteus_attn_diagonal
-#   Sequential chains, start from base model.
-#
-# Usage:
-#   ./run_all.sh YOUR_NTFY_TOPIC
-
 NTFY_TOPIC="${1:-proteus-aman-2026}"
 LOG="results/run_all.log"
 STEPS=2000
-LONG_STEPS=4000
 N_EVAL=100
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_VERBOSITY=error
@@ -29,30 +10,19 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONWARNINGS="ignore::UserWarning"
 
 START_TIME=$(date +%s)
-RATE=1.99   # USD/hr for MI300X
+RATE=1.99
 
 mkdir -p results
-
 set -eo pipefail
 
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
-}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 
 notify() {
-    local title="$1"
-    local message="$2"
-    local priority="${3:-default}"
-    local tags="${4:-}"
-    if ! curl -fsS --connect-timeout 10 --max-time 20 \
-        -H "Title: $title" \
-        -H "Priority: $priority" \
-        -H "Markdown: yes" \
-        ${tags:+-H "Tags: $tags"} \
-        --data-raw "$message" \
-        "https://ntfy.sh/$NTFY_TOPIC" > /dev/null; then
-        log "[notify] WARNING: failed to send to topic '$NTFY_TOPIC' (title: $title)"
-    fi
+    local title="$1" message="$2" priority="${3:-default}" tags="${4:-}"
+    curl -fsS --connect-timeout 10 --max-time 20 \
+        -H "Title: $title" -H "Priority: $priority" -H "Markdown: yes" \
+        ${tags:+-H "Tags: $tags"} --data-raw "$message" \
+        "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 || true
 }
 
 elapsed_str() {
@@ -70,19 +40,12 @@ STATUS_FILE="results/.live_status.json"
 CURRENT_STEP="unknown"
 STATUS_RENDER_PID=""
 
-set_step() {
-    CURRENT_STEP="$1"
-    echo "$1" > "$STEP_FILE"
-}
-
-get_step() {
-    cat "$STEP_FILE" 2>/dev/null || echo "unknown"
-}
+set_step() { CURRENT_STEP="$1"; echo "$1" > "$STEP_FILE"; }
+get_step()  { cat "$STEP_FILE" 2>/dev/null || echo "unknown"; }
 
 last_clean_log() {
     grep -E "^\[20|loss|perplexity|DONE|START|CRASH" "$LOG" 2>/dev/null \
-        | tail -1 \
-        || echo "no log yet"
+        | tail -1 || echo "no log yet"
 }
 
 format_status_line() {
@@ -128,8 +91,7 @@ start_status_renderer() {
             line=$(format_status_line 2>/dev/null)
             if [[ -n "$line" ]]; then
                 rows=$(tput lines 2>/dev/null || echo 24)
-                printf "\0337\033[%d;0H\033[2K\033[1;36m%s\033[0m\0338" \
-                    "$rows" "$line" > "$TTY"
+                printf "\0337\033[%d;0H\033[2K\033[1;36m%s\033[0m\0338" "$rows" "$line" > "$TTY"
             fi
         fi
         sleep 1
@@ -158,8 +120,7 @@ on_error() {
     notify "Proteus CRASHED" \
 "Step: $step
 Exit: $exit_code | Elapsed: $(elapsed_str) | Spent: $(credit_used)
-Last: $(last_clean_log)
-Resume manually from failed step." "urgent" "rotating_light"
+Last: $(last_clean_log)" "urgent" "rotating_light"
     kill "${HEARTBEAT_PID:-}" 2>/dev/null || true
     exit $exit_code
 }
@@ -244,7 +205,6 @@ run_ewc_domain() {
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
 
-    # Eval IMMEDIATELY before anything else
     set_step "eval/ewc_canon_after_$domain"
     log "START $CURRENT_STEP"
     start_status_renderer
@@ -256,23 +216,17 @@ run_ewc_domain() {
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
 
-    log "Cleaning checkpoint: keeping fisher.pt, removing weights from ewc_canon/${domain}"
-    #find ./checkpoints/ewc_canon/${domain}/ \
-    #    -name "*.safetensors" -o -name "*.bin" | xargs rm -f 2>&1 || true
-
     log "Domain ${domain} done. Disk state:"
     df -h / 2>&1 | tee -a "$LOG"
 }
 
-# ── Kill stale training processes and free VRAM ──────────────────────────────
+# ── Kill stale processes and free VRAM ───────────────────────────────────────
 log "Cleaning up stale Python processes..."
 for pid in $(pgrep -f "python train.py" 2>/dev/null); do
-    log "  Killing stale PID $pid"
-    kill -9 "$pid" 2>/dev/null || true
+    log "  Killing stale PID $pid"; kill -9 "$pid" 2>/dev/null || true
 done
 for pid in $(pgrep -f "python eval.py" 2>/dev/null); do
-    log "  Killing stale PID $pid"
-    kill -9 "$pid" 2>/dev/null || true
+    log "  Killing stale PID $pid"; kill -9 "$pid" 2>/dev/null || true
 done
 sleep 2
 log "VRAM state after cleanup:"
@@ -280,35 +234,17 @@ rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
 # ─────────────────────────────────────────────────────────────────────────────
 
 log "=============================="
-log "Proteus full experimental run"
+log "Proteus — EWC + Replay rerun"
 log "ntfy topic: $NTFY_TOPIC"
 log "=============================="
 
-notify "Proteus full run started" \
-"Sections: EWC canon rerun | Replay canon
-Topic: $NTFY_TOPIC" "default" "rocket"
-
+notify "Proteus EWC+Replay rerun started" "Topic: $NTFY_TOPIC" "default" "rocket"
 
 # ══════════════════════════════════════════════
-# SECTION 1: Extended Medical→Legal — DONE, skip
+# EWC canonical chain (full rerun — medical weights were lost)
 # ══════════════════════════════════════════════
-log "=============================="
-log "SECTION 1: Extended 4k Medical→Legal — SKIPPED (done)"
-log "=============================="
-
-
-# ══════════════════════════════════════════════
-# SECTION 2: Canonical 4-domain sequential chains
-# ══════════════════════════════════════════════
-log "=============================="
-log "SECTION 2: Canonical 4-domain chains (2000 steps)"
-log "=============================="
-
-# proteus_canon, full_canon, lora_canon — DONE, skip
-
 log "--- CHAIN: ewc_canon ---"
-# medical DONE — checkpoint + fisher.pt intact at checkpoints/ewc_canon/medical/
-#run_ewc_domain medical ""
+run_ewc_domain medical ""
 run_ewc_domain legal medical
 run_ewc_domain code legal
 run_ewc_domain multilingual code
@@ -317,54 +253,45 @@ notify "EWC canonical chain done" \
 "$(eval_summary)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
+# ══════════════════════════════════════════════
+# Replay canonical chain
+# ══════════════════════════════════════════════
 log "--- CHAIN: replay_canon ---"
-run_train medical    replay checkpoints/replay_canon/medical       --max_steps "$STEPS"
-run_eval  checkpoints/replay_canon/medical       replay_canon_after_medical
+run_train medical replay checkpoints/replay_canon/medical --max_steps "$STEPS"
+run_eval  checkpoints/replay_canon/medical replay_canon_after_medical
 log "Building replay buffer from medical..."
 python build_replay_buffer.py --domain medical 2>&1 | tee -a "$LOG"
 
-run_train legal      replay checkpoints/replay_canon/legal         --max_steps "$STEPS" \
+run_train legal replay checkpoints/replay_canon/legal --max_steps "$STEPS" \
     --start_from checkpoints/replay_canon/medical \
     --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_canon/legal         replay_canon_after_legal
+run_eval  checkpoints/replay_canon/legal replay_canon_after_legal
 log "Building replay buffer: appending legal..."
 python build_replay_buffer.py --domain legal 2>&1 | tee -a "$LOG"
 
-run_train code       replay checkpoints/replay_canon/code          --max_steps "$STEPS" \
+run_train code replay checkpoints/replay_canon/code --max_steps "$STEPS" \
     --start_from checkpoints/replay_canon/legal \
     --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_canon/code          replay_canon_after_code
+run_eval  checkpoints/replay_canon/code replay_canon_after_code
 log "Building replay buffer: appending code..."
 python build_replay_buffer.py --domain code 2>&1 | tee -a "$LOG"
 
 run_train multilingual replay checkpoints/replay_canon/multilingual --max_steps "$STEPS" \
     --start_from checkpoints/replay_canon/code \
     --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_canon/multilingual  replay_canon_after_multilingual
+run_eval  checkpoints/replay_canon/multilingual replay_canon_after_multilingual
 
-notify "Section 2 done: EWC + Replay canonical chains" \
+notify "Replay canonical chain done" \
 "$(eval_summary)
 Elapsed: $(elapsed_str) | Spent: $(credit_used)" "default" "white_check_mark"
 
-
-# ══════════════════════════════════════════════
-# SECTION 3: Attention sweeps — DONE, skip
-# ══════════════════════════════════════════════
-log "=============================="
-log "SECTION 3: Attention sweeps — SKIPPED (done)"
-log "=============================="
-
-# 5a (proteus_attn_freeze) — DONE, all 4 domains complete
-# 5c (proteus_attn_diagonal) — DONE, all 4 domains complete
-
 # ─────────────────────────────────────────────
 log "=============================="
-log "All sections complete."
-log "Elapsed: $(elapsed_str) | Total spend: $(credit_used)"
+log "All done. Elapsed: $(elapsed_str) | Total spend: $(credit_used)"
 log "=============================="
 
 notify "Proteus COMPLETE" \
-"EWC + Replay canonical chains done.
+"EWC + Replay done.
 Elapsed: $(elapsed_str) | Total: $(credit_used)
 
 $(eval_summary)" "high" "checkered_flag"
