@@ -127,15 +127,20 @@ PY
 }
 
 start_status_renderer() {
-    [[ ! -t 2 ]] && return
+    [[ ! -f /dev/tty ]] && return
     rm -f "$STATUS_FILE"; : > "$STATUS_FILE"
-    ( while true; do
+    ( TTY=/dev/tty
+      while true; do
         if [[ -s "$STATUS_FILE" ]]; then
-            line=$(format_status_line)
-            [[ -n "$line" ]] && printf "\r\033[2K%s" "$line" >&2
+            line=$(format_status_line 2>/dev/null)
+            if [[ -n "$line" ]]; then
+                rows=$(tput lines 2>/dev/null || echo 24)
+                printf "\0337\033[%d;0H\033[2K\033[1;36m%s\033[0m\0338" \
+                    "$rows" "$line" > "$TTY"
+            fi
         fi
         sleep 1
-    done ) &
+      done ) &
     STATUS_RENDER_PID=$!
 }
 
@@ -145,7 +150,10 @@ stop_status_renderer() {
         wait "$STATUS_RENDER_PID" 2>/dev/null || true
         STATUS_RENDER_PID=""
     fi
-    [[ -t 2 ]] && printf "\r\033[2K" >&2
+    if [[ -f /dev/tty ]]; then
+        rows=$(tput lines 2>/dev/null || echo 24)
+        printf "\0337\033[%d;0H\033[2K\0338" "$rows" > /dev/tty
+    fi
     rm -f "$STATUS_FILE"
 }
 
