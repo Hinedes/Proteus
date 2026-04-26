@@ -91,6 +91,10 @@ notify "EWC+Replay rerun started" "1x MI300X | ETA ~2.5h | Topic: $NTFY_TOPIC" "
 rm -f data/replay_buffer.jsonl
 log "Cleared stale replay buffer."
 
+# Wipe eval log so v4 results are clean
+rm -f results/eval_log.jsonl
+log "Cleared stale eval_log.jsonl."
+
 # ── Kill stale processes and free VRAM ───────────────────────────────────────
 log "Cleaning up stale Python processes..."
 for pid in $(pgrep -f "python train.py" 2>/dev/null); do

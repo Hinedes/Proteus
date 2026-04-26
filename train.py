@@ -316,8 +316,6 @@ class EWCTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.ewc_lambda = ewc_lambda
         self.args.ewc_lambda = ewc_lambda
-        self.model_accepts_loss_kwargs = False
-
         self._ewc_enabled = fisher is not None and opt_params is not None
         print(f"[ewc] EWCTrainer init: _ewc_enabled={self._ewc_enabled}, lambda={ewc_lambda}")
         self._fisher_dict = fisher or {}
@@ -406,11 +404,6 @@ class EWCTrainer(Trainer):
             self._apply_ewc_grad_penalty()
 
         return loss
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        outputs = model(**inputs)
-        loss = outputs.loss
-        return (loss, outputs) if return_outputs else loss
 
 
 def apply_proteus_attention_strategy(model, attention_mode: str):
