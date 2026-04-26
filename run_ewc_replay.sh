@@ -8,7 +8,7 @@ chmod +x "$0"
 
 NTFY_TOPIC="${1:-proteus-aman-2026}"
 LOG="results/run_ewc_replay.log"
-STEPS=2000
+STEPS=500
 N_EVAL=200
 BS=16
 
@@ -105,21 +105,21 @@ notify "EWC medical done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low
 run_train legal ewc checkpoints/ewc_v2/legal \
     --start_from checkpoints/ewc_v2/medical \
     --ewc_state  checkpoints/ewc_v2/medical/fisher.pt \
-    --ewc_lambda 1000 --ewc_samples 128
+    --ewc_lambda 5000 --ewc_samples 128
 run_eval  checkpoints/ewc_v2/legal ewc_v2_after_legal
 notify "EWC legal done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
 run_train code ewc checkpoints/ewc_v2/code \
     --start_from checkpoints/ewc_v2/legal \
     --ewc_state  checkpoints/ewc_v2/legal/fisher.pt \
-    --ewc_lambda 1000 --ewc_samples 128
+    --ewc_lambda 5000 --ewc_samples 128
 run_eval  checkpoints/ewc_v2/code ewc_v2_after_code
 notify "EWC code done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
 run_train multilingual ewc checkpoints/ewc_v2/multilingual \
     --start_from checkpoints/ewc_v2/code \
     --ewc_state  checkpoints/ewc_v2/code/fisher.pt \
-    --ewc_lambda 1000 --ewc_samples 128
+    --ewc_lambda 5000 --ewc_samples 128
 run_eval  checkpoints/ewc_v2/multilingual ewc_v2_after_multilingual
 notify "EWC chain COMPLETE" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "high" "white_check_mark"
 
