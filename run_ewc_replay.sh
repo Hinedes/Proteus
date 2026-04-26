@@ -99,7 +99,27 @@ done
 for pid in $(pgrep -f "python eval.py" 2>/dev/null); do
     log "  Killing stale PID $pid"; kill -9 "$pid" 2>/dev/null || true
 done
+
+log "Killing any processes holding GPU device handles..."
+for dev in /dev/kfd /dev/dri/renderD128 /dev/dri/renderD129; do
+    [ -e "$dev" ] || continue
+    for pid in $(fuser "$dev" 2>/dev/null); do
+        log "  Killing GPU-holding PID $pid ($dev)"; kill -9 "$pid" 2>/dev/null || true
+    done
+done
+sleep 3
+
+log "Forcing PyTorch GPU cache flush..."
+python3 -c "
+import torch, gc
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    print('GPU cache flushed.')
+" 2>&1 | tee -a "$LOG" || true
 sleep 2
+
 log "VRAM state after cleanup:"
 rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
 # ─────────────────────────────────────────────────────────────────────────────
