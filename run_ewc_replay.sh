@@ -91,6 +91,19 @@ notify "EWC+Replay rerun started" "1x MI300X | ETA ~2.5h | Topic: $NTFY_TOPIC" "
 rm -f data/replay_buffer.jsonl
 log "Cleared stale replay buffer."
 
+# ── Kill stale processes and free VRAM ───────────────────────────────────────
+log "Cleaning up stale Python processes..."
+for pid in $(pgrep -f "python train.py" 2>/dev/null); do
+    log "  Killing stale PID $pid"; kill -9 "$pid" 2>/dev/null || true
+done
+for pid in $(pgrep -f "python eval.py" 2>/dev/null); do
+    log "  Killing stale PID $pid"; kill -9 "$pid" 2>/dev/null || true
+done
+sleep 2
+log "VRAM state after cleanup:"
+rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ══════════════════════════════════════════════
 # EWC CHAIN
 # Domain 1: no --ewc_state (first domain, penalty off)
