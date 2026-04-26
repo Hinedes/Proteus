@@ -853,7 +853,7 @@ def main():
         train_dataset = tokenized,
         data_collator = collator,
     )
-    if args.condition == "ewc":
+    if args.condition == "ewc" and trainer_class is EWCTrainer:
         trainer_kwargs.update(
             ewc_lambda  = args.ewc_lambda,
             fisher      = fisher,
