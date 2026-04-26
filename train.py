@@ -808,20 +808,26 @@ def main():
     print(f"Loading {args.domain} dataset...")
     raw_ds = load_domain(args.domain, split="train")
 
+    effective_batch = args.batch_size * args.grad_accum
+    max_samples = args.max_steps * effective_batch * 2
+
     if args.condition == "replay" and args.replay_buffer:
         replay_records = load_replay_buffer(args.replay_buffer)
+        # Truncate the domain dataset FIRST so replay data isn't amputated
+        if len(raw_ds) > max_samples:
+            print(f"[data] Truncating domain to {max_samples:,} before replay injection.")
+            raw_ds = raw_ds.select(range(max_samples))
         n_replay = int(len(raw_ds) * args.replay_ratio / (1 - args.replay_ratio))
         n_replay = min(n_replay, len(replay_records))
         sampled  = random.sample(replay_records, n_replay)
-        combined = Dataset.from_list(list(raw_ds) + sampled)
-        print(f"[replay] {len(raw_ds)} current + {n_replay} replay = {len(combined)} total")
-        raw_ds = combined
-
-    effective_batch = args.batch_size * args.grad_accum
-    max_samples = args.max_steps * effective_batch * 2
-    if len(raw_ds) > max_samples:
-        print(f"[data] Truncating {len(raw_ds):,} → {max_samples:,} samples (2x needed)")
-        raw_ds = raw_ds.select(range(max_samples))
+        combined_list = list(raw_ds) + sampled
+        random.shuffle(combined_list)
+        raw_ds = Dataset.from_list(combined_list)
+        print(f"[replay] {len(raw_ds) - n_replay} current + {n_replay} replay = {len(raw_ds)} total")
+    else:
+        if len(raw_ds) > max_samples:
+            print(f"[data] Truncating {len(raw_ds):,} → {max_samples:,} samples (2x needed)")
+            raw_ds = raw_ds.select(range(max_samples))
 
     tokenized = tokenize_dataset(raw_ds, tokenizer)
     collator  = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True, pad_to_multiple_of=128)

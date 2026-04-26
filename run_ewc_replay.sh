@@ -8,7 +8,7 @@ chmod +x "$0"
 
 NTFY_TOPIC="${1:-proteus-aman-2026}"
 LOG="results/run_ewc_replay.log"
-STEPS=500
+STEPS=2000
 N_EVAL=200
 BS=16
 
