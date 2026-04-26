@@ -41,6 +41,22 @@ notify() {
         "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 || true
 }
 
+snap_results() {
+    # Push current eval_log.jsonl to ntfy so numbers survive droplet death
+    local label="$1"
+    local log_content=""
+    if [ -f results/eval_log.jsonl ]; then
+        log_content=$(cat results/eval_log.jsonl)
+    else
+        log_content="(no results yet)"
+    fi
+    curl -fsS --connect-timeout 10 --max-time 20 \
+        -H "Title: Proteus result snapshot: $label" \
+        -H "Priority: high" \
+        --data-raw "Elapsed: $(elapsed_str) | Spent: $(credit_used)\n\n$log_content" \
+        "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 || true
+}
+
 on_error() {
     local exit_code=$? line=$1
     log "CRASH at line $line (exit $exit_code) | Elapsed: $(elapsed_str) | Spent: $(credit_used)"
@@ -137,6 +153,7 @@ log "====== EWC CHAIN ======"
 
 run_train medical ewc checkpoints/ewc_v2/medical
 run_eval  checkpoints/ewc_v2/medical ewc_v2_after_medical
+snap_results "ewc_after_medical"
 notify "EWC medical done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
 run_train legal ewc checkpoints/ewc_v2/legal \
@@ -144,6 +161,7 @@ run_train legal ewc checkpoints/ewc_v2/legal \
     --ewc_state  checkpoints/ewc_v2/medical/fisher.pt \
     --ewc_lambda 5000 --ewc_samples 128
 run_eval  checkpoints/ewc_v2/legal ewc_v2_after_legal
+snap_results "ewc_after_legal"
 notify "EWC legal done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
 run_train code ewc checkpoints/ewc_v2/code \
@@ -151,6 +169,7 @@ run_train code ewc checkpoints/ewc_v2/code \
     --ewc_state  checkpoints/ewc_v2/legal/fisher.pt \
     --ewc_lambda 5000 --ewc_samples 128
 run_eval  checkpoints/ewc_v2/code ewc_v2_after_code
+snap_results "ewc_after_code"
 notify "EWC code done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
 run_train multilingual ewc checkpoints/ewc_v2/multilingual \
@@ -158,6 +177,7 @@ run_train multilingual ewc checkpoints/ewc_v2/multilingual \
     --ewc_state  checkpoints/ewc_v2/code/fisher.pt \
     --ewc_lambda 5000 --ewc_samples 128
 run_eval  checkpoints/ewc_v2/multilingual ewc_v2_after_multilingual
+snap_results "ewc_after_multilingual"
 notify "EWC chain COMPLETE" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "high" "white_check_mark"
 
 # ══════════════════════════════════════════════
@@ -169,6 +189,7 @@ log "====== REPLAY CHAIN ======"
 
 run_train medical replay checkpoints/replay_v2/medical
 run_eval  checkpoints/replay_v2/medical replay_v2_after_medical
+snap_results "replay_after_medical"
 build_replay medical
 notify "Replay medical done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
@@ -176,6 +197,7 @@ run_train legal replay checkpoints/replay_v2/legal \
     --start_from checkpoints/replay_v2/medical \
     --replay_buffer data/replay_buffer.jsonl
 run_eval  checkpoints/replay_v2/legal replay_v2_after_legal
+snap_results "replay_after_legal"
 build_replay legal
 notify "Replay legal done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
@@ -183,6 +205,7 @@ run_train code replay checkpoints/replay_v2/code \
     --start_from checkpoints/replay_v2/legal \
     --replay_buffer data/replay_buffer.jsonl
 run_eval  checkpoints/replay_v2/code replay_v2_after_code
+snap_results "replay_after_code"
 build_replay code
 notify "Replay code done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
@@ -190,6 +213,7 @@ run_train multilingual replay checkpoints/replay_v2/multilingual \
     --start_from checkpoints/replay_v2/code \
     --replay_buffer data/replay_buffer.jsonl
 run_eval  checkpoints/replay_v2/multilingual replay_v2_after_multilingual
+snap_results "replay_after_multilingual"
 notify "Replay chain COMPLETE" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "high" "white_check_mark"
 
 # ─────────────────────────────────────────────
