@@ -151,32 +151,32 @@ rocm-smi --showmeminfo vram 2>&1 | tee -a "$LOG" || true
 # ══════════════════════════════════════════════
 log "====== EWC CHAIN ======"
 
-run_train medical ewc checkpoints/ewc_v2/medical
-run_eval  checkpoints/ewc_v2/medical ewc_v2_after_medical
+run_train medical ewc checkpoints/ewc/medical
+run_eval  checkpoints/ewc/medical ewc_after_medical
 snap_results "ewc_after_medical"
 notify "EWC medical done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
-run_train legal ewc checkpoints/ewc_v2/legal \
-    --start_from checkpoints/ewc_v2/medical \
-    --ewc_state  checkpoints/ewc_v2/medical/fisher.pt \
+run_train legal ewc checkpoints/ewc/legal \
+    --start_from checkpoints/ewc/medical \
+    --ewc_state  checkpoints/ewc/medical/fisher.pt \
     --ewc_lambda 5000 --ewc_samples 128
-run_eval  checkpoints/ewc_v2/legal ewc_v2_after_legal
+run_eval  checkpoints/ewc/legal ewc_after_legal
 snap_results "ewc_after_legal"
 notify "EWC legal done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
-run_train code ewc checkpoints/ewc_v2/code \
-    --start_from checkpoints/ewc_v2/legal \
-    --ewc_state  checkpoints/ewc_v2/legal/fisher.pt \
+run_train code ewc checkpoints/ewc/code \
+    --start_from checkpoints/ewc/legal \
+    --ewc_state  checkpoints/ewc/legal/fisher.pt \
     --ewc_lambda 5000 --ewc_samples 128
-run_eval  checkpoints/ewc_v2/code ewc_v2_after_code
+run_eval  checkpoints/ewc/code ewc_after_code
 snap_results "ewc_after_code"
 notify "EWC code done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
-run_train multilingual ewc checkpoints/ewc_v2/multilingual \
-    --start_from checkpoints/ewc_v2/code \
-    --ewc_state  checkpoints/ewc_v2/code/fisher.pt \
+run_train multilingual ewc checkpoints/ewc/multilingual \
+    --start_from checkpoints/ewc/code \
+    --ewc_state  checkpoints/ewc/code/fisher.pt \
     --ewc_lambda 5000 --ewc_samples 128
-run_eval  checkpoints/ewc_v2/multilingual ewc_v2_after_multilingual
+run_eval  checkpoints/ewc/multilingual ewc_after_multilingual
 snap_results "ewc_after_multilingual"
 notify "EWC chain COMPLETE" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "high" "white_check_mark"
 
@@ -187,32 +187,32 @@ notify "EWC chain COMPLETE" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "h
 # ══════════════════════════════════════════════
 log "====== REPLAY CHAIN ======"
 
-run_train medical replay checkpoints/replay_v2/medical
-run_eval  checkpoints/replay_v2/medical replay_v2_after_medical
+run_train medical replay checkpoints/replay/medical
+run_eval  checkpoints/replay/medical replay_after_medical
 snap_results "replay_after_medical"
 build_replay medical
 notify "Replay medical done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
-run_train legal replay checkpoints/replay_v2/legal \
-    --start_from checkpoints/replay_v2/medical \
+run_train legal replay checkpoints/replay/legal \
+    --start_from checkpoints/replay/medical \
     --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_v2/legal replay_v2_after_legal
+run_eval  checkpoints/replay/legal replay_after_legal
 snap_results "replay_after_legal"
 build_replay legal
 notify "Replay legal done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
-run_train code replay checkpoints/replay_v2/code \
-    --start_from checkpoints/replay_v2/legal \
+run_train code replay checkpoints/replay/code \
+    --start_from checkpoints/replay/legal \
     --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_v2/code replay_v2_after_code
+run_eval  checkpoints/replay/code replay_after_code
 snap_results "replay_after_code"
 build_replay code
 notify "Replay code done" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "low"
 
-run_train multilingual replay checkpoints/replay_v2/multilingual \
-    --start_from checkpoints/replay_v2/code \
+run_train multilingual replay checkpoints/replay/multilingual \
+    --start_from checkpoints/replay/code \
     --replay_buffer data/replay_buffer.jsonl
-run_eval  checkpoints/replay_v2/multilingual replay_v2_after_multilingual
+run_eval  checkpoints/replay/multilingual replay_after_multilingual
 snap_results "replay_after_multilingual"
 notify "Replay chain COMPLETE" "Elapsed: $(elapsed_str) | Spent: $(credit_used)" "high" "white_check_mark"
 
