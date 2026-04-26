@@ -315,7 +315,6 @@ class EWCTrainer(Trainer):
     def __init__(self, *args, ewc_lambda=5000.0, fisher=None, opt_params=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.ewc_lambda = ewc_lambda
-        self.args.ewc_lambda = ewc_lambda
         self._ewc_enabled = fisher is not None and opt_params is not None
         print(f"[ewc] EWCTrainer init: _ewc_enabled={self._ewc_enabled}, lambda={ewc_lambda}")
         self._fisher_dict = fisher or {}
@@ -576,15 +575,17 @@ def setup_lora_ffn_condition(model, args):
 
 def setup_ewc_condition(model, args):
     model.train()
-    fisher = None
-    opt_params = None
     if args.ewc_state:
         device = next(model.parameters()).device
         fisher, opt_params = load_ewc_state(args.ewc_state, device=device)
-        print(f"[ewc] lambda={args.ewc_lambda}, prior state loaded to {device}.")
+        print(f"[ewc] Prior state loaded. lambda={args.ewc_lambda}, device={device}.")
+        return [], EWCTrainer, fisher, opt_params
     else:
-        print("[ewc] No prior state — first domain, training without penalty.")
-    return [], EWCTrainer, fisher, opt_params
+        # Domain 1: no Fisher state, no penalty needed.
+        # Use base Trainer directly — EWCTrainer on domain 1 should be identical
+        # but using base Trainer eliminates any hidden interference from EWCTrainer init.
+        print("[ewc] No prior state — domain 1, using base Trainer (clean pass).")
+        return [], Trainer, None, None
 
 
 def setup_replay_condition(model, args):
