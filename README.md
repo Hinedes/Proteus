@@ -21,7 +21,7 @@ Amantur Saliev, 2026
 - Shell saturation sets a hard capacity limit for long domain chains.
 - Attention layers must stay fully trainable (no nesting).
 
-> *"Google DeepMind bullies the core into storing invariant data — I just froze it."*
+> *"MatFormer researchers forced the core into storing invariant data - I just froze it."*
 
 ## How to cite
 
