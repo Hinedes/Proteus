@@ -1,4 +1,3 @@
-```markdown
 # 🌊 Proteus
 
 **Matryoshka Plasticity: Exploiting Nested Transformer Structure for Zero‑Overhead Continual Learning**
@@ -6,14 +5,14 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19841424.svg)](https://doi.org/10.5281/zenodo.19841424)
 
 Activation hierarchy **is** protection hierarchy.  
-MatFormer’s nested structure gives a free importance ranking — freeze the Core, train the outer shells, and retain previous domains with zero overhead.
+MatFormer's nested structure gives a free importance ranking — freeze the Core, train the outer shells, and retain previous domains with zero overhead.
 
 Zero Fisher matrices. Zero replay buffers. Zero added parameters.
 
 ## Paper
 
 **Preprint:** [10.5281/zenodo.19841424](https://doi.org/10.5281/zenodo.19841424)  
-`Matryoshka Plasticity: Exploiting Nested Transformer Structure for Zero‑Overhead Continual Learning`  
+*Matryoshka Plasticity: Exploiting Nested Transformer Structure for Zero‑Overhead Continual Learning*  
 Amantur Saliev, 2026
 
 ### Key results (Gemma‑4‑E4B, Medical → Legal → Code)
@@ -22,12 +21,11 @@ Amantur Saliev, 2026
 - Shell saturation sets a hard capacity limit for long domain chains.
 - Attention layers must stay fully trainable (no nesting).
 
-> *“Google DeepMind bullies the core into storing invariant data — I just froze it.”*
+> *"Google DeepMind bullies the core into storing invariant data — I just froze it."*
 
 ## How to cite
 
-```ieee
-[1] A. Saliev, "Matryoshka Plasticity: Exploiting Nested Transformer Structure for Zero‑Overhead Continual Learning," Zenodo, Apr. 28, 2026. doi: 10.5281/zenodo.19841424.
+> [1] A. Saliev, "Matryoshka Plasticity: Exploiting Nested Transformer Structure for Zero‑Overhead Continual Learning," Zenodo, Apr. 28, 2026. doi: 10.5281/zenodo.19841424.
 
 ## Quickstart
 
@@ -46,10 +44,3 @@ python train.py --domain medical --condition proteus --out_dir checkpoints/msf -
 
 # Evaluate
 python eval.py --checkpoint checkpoints/msf/medical --label msf_after_medical --n_samples 100
-```
-
-## License
-
-- **Code:** [CC BY‑NC 4.0](LICENSE) – free for non‑commercial use.  
-- **Paper:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) – open access.
-```
