@@ -23,10 +23,6 @@ Amantur Saliev, 2026
 
 > *"MatFormer researchers forced the core into storing invariant data - I just froze it."*
 
-## How to cite
-
-> [1] A. Saliev, "Matryoshka Plasticity: Exploiting Nested Transformer Structure for Zero‑Overhead Continual Learning," Zenodo, Apr. 28, 2026. doi: 10.5281/zenodo.19841424.
-
 ## Quickstart
 
 ```bash
