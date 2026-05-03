@@ -134,7 +134,8 @@ atexit.register(cleanup_runtime)
 
 
 class TrainStatusCallback(TrainerCallback):
-    """Streams step-level metrics for shell-side single-line rendering."""
+    """Streams step‑level metrics for shell‑side single‑line rendering
+       AND draws a terminal / Jupyter progress bar via tqdm."""
 
     def __init__(self, writer: StatusWriter, condition: str, domain: str, total_steps: int):
         self.writer = writer
@@ -143,26 +144,31 @@ class TrainStatusCallback(TrainerCallback):
         self.total_steps = total_steps
         self._start_time = None
         self._last_loss = None
+        self.pbar = None
 
-    def _emit(self, state_label: str, step: int):
+    # ── small helpers ──────────────────────────────────────────
+    def _elapsed(self):
         if self._start_time is None:
-            self._start_time = time.time()
+            return 1e-6
+        return max(time.time() - self._start_time, 1e-6)
 
-        total = max(int(self.total_steps), 0)
-        step = max(int(step), 0)
-        elapsed = max(time.time() - self._start_time, 1e-6)
+    def _compute_stats(self, step: int):
+        elapsed = self._elapsed()
         it_s = step / elapsed if step > 0 else 0.0
         eta_s = None
-        if total > 0 and it_s > 0.0 and step < total:
-            eta_s = (total - step) / it_s
+        if self.total_steps > 0 and it_s > 0.0 and step < self.total_steps:
+            eta_s = (self.total_steps - step) / it_s
+        return it_s, eta_s
 
+    def _emit_status(self, state_label: str, step: int):
+        it_s, eta_s = self._compute_stats(step)
         payload = {
             "phase": "train",
             "state": state_label,
             "condition": self.condition,
             "domain": self.domain,
             "step": step,
-            "total_steps": total,
+            "total_steps": self.total_steps,
             "it_s": it_s,
             "eta_s": eta_s,
         }
@@ -170,55 +176,77 @@ class TrainStatusCallback(TrainerCallback):
             payload["loss"] = float(self._last_loss)
         self.writer.emit(payload)
 
+    # ── auto‑detect environment ─────────────────────────────────
+    @staticmethod
+    def _is_notebook():
+        try:
+            shell = get_ipython().__class__.__name__  # noqa
+            if shell == "ZMQInteractiveShell":
+                return True   # Jupyter notebook / JupyterLab
+            return False
+        except NameError:
+            return False      # standard terminal
+
+    # ── TrainerCallback interface ───────────────────────────────
     def on_train_begin(self, args, state, control, **kwargs):
         self._start_time = time.time()
-        self._emit("running", state.global_step)
+        self._emit_status("running", state.global_step)
+
+        # --- create tqdm bar (terminal or notebook) ---
+        if self._is_notebook():
+            from tqdm.notebook import tqdm as tqdm_notebook
+            self.pbar = tqdm_notebook(
+                total=self.total_steps,
+                desc=f"[train {self.condition}/{self.domain}]",
+                unit="step",
+                dynamic_ncols=False,
+            )
+        else:
+            from tqdm import tqdm as tqdm_std
+            import sys
+            self.pbar = tqdm_std(
+                total=self.total_steps,
+                position=0,
+                leave=True,
+                dynamic_ncols=True,
+                file=sys.stdout,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+                desc=f"[train {self.condition}/{self.domain}]",
+            )
 
     def on_step_end(self, args, state, control, **kwargs):
-        self._emit("running", state.global_step)
+        self._emit_status("running", state.global_step)
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         log_data = logs if isinstance(logs, dict) else kwargs.get("logs")
         if isinstance(log_data, dict) and log_data.get("loss") is not None:
             self._last_loss = log_data["loss"]
-        self._emit("running", state.global_step)
+
+        step = state.global_step
+        it_s, eta_s = self._compute_stats(step)
+        self._emit_status("running", step)
+
+        if self.pbar is not None:
+            self.pbar.n = step
+            postfix = {
+                "loss": f"{self._last_loss:.4f}" if self._last_loss is not None else "N/A",
+                "it/s": f"{it_s:.2f}",
+            }
+            if eta_s is not None:
+                postfix["ETA"] = f"{eta_s:.0f}s" if eta_s < 120 else f"{eta_s / 60:.1f}min"
+            self.pbar.set_postfix(**postfix)
+            self.pbar.refresh()
 
     def on_train_end(self, args, state, control, **kwargs):
-        self._emit("done", state.global_step)
+        if self.pbar is not None:
+            self.pbar.close()
+            self.pbar = None
+        self._emit_status("done", state.global_step)
 
 # ─────────────────────────────────────────────
 # aiter — MI300X fused kernel optimizations
 # ─────────────────────────────────────────────
-def apply_aiter_optimizations(model):
-    """
-    Monkey-patches Gemma4 MLP forward with aiter's fused silu_and_mul kernel.
-    Replaces: silu(gate_proj(x)) * up_proj(x)  →  aiter.silu_and_mul (one kernel)
-    Safe: wrapped in try/except, falls back to stock ops on any failure.
-    """
-    try:
-        import aiter as _aiter
-
-        layers = model.model.language_model.layers
-        patched = 0
-
-        def make_aiter_mlp_forward(original_mlp):
-            def forward(hidden_states):
-                gate = original_mlp.gate_proj(hidden_states)
-                up   = original_mlp.up_proj(hidden_states)
-                fused_input = torch.cat([gate, up], dim=-1)
-                activated   = torch.empty_like(gate)
-                _aiter.silu_and_mul(activated, fused_input)
-                return original_mlp.down_proj(activated)
-            return forward
-
-        for layer in layers:
-            mlp = layer.mlp
-            mlp.forward = make_aiter_mlp_forward(mlp)
-            patched += 1
-
-        print(f"[aiter] Patched {patched} MLP layers with fused silu_and_mul.")
-    except Exception as e:
-        print(f"[aiter] Skipping optimizations: {e}")
+#Deleted.
 
 
 # ─────────────────────────────────────────────
@@ -249,10 +277,19 @@ def register_hooks(model):
 # ─────────────────────────────────────────────
 # EWC — Fisher matrix computation + custom Trainer
 # ─────────────────────────────────────────────
-def compute_fisher(model, dataset, n_samples=200, batch_size=16):
+def compute_fisher(model, dataset, n_samples=200, batch_size=2):
     model.eval()
-    fisher     = {n: torch.zeros_like(p) for n, p in model.named_parameters() if p.requires_grad}
-    opt_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+    fisher     = {}
+    opt_params = {}
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # Exclude huge embedding tables from EWC – they don't benefit from importance
+        # regularization and would blow up the penalty cache (PLE alone is ~2.8B params).
+        if any(pat in n for pat in ("embed_tokens", "per_layer_projection", "per_layer_model_projection")):
+            continue
+        fisher[n] = torch.zeros_like(p)
+        opt_params[n] = p.data.clone()
 
     indices = random.sample(range(len(dataset)), min(n_samples, len(dataset)))
     n_batches = 0
@@ -710,7 +747,7 @@ def tokenize_dataset(raw_ds: Dataset, tokenizer) -> Dataset:
 
         return {"input_ids": all_input_ids, "labels": all_labels, "length": all_lengths}
 
-    return raw_ds.map(tokenize_fn, batched=True, remove_columns=raw_ds.column_names)
+    return raw_ds.map(tokenize_fn, batched=True, remove_columns=raw_ds.column_names, num_proc=16)
 
 
 # ─────────────────────────────────────────────
@@ -793,7 +830,13 @@ def main():
         del model.multi_modal_projector
     torch.cuda.empty_cache()
 
-    apply_aiter_optimizations(model)
+    # Freeze non-language-model parameters – present but unused.
+    # Cuts EWC state from ~32 GB to ~16 GB, preventing OOM.
+    for name, param in model.named_parameters():
+        # Keep the core language model and the final prediction head trainable
+        if "language_model" not in name and "lm_head" not in name:
+            param.requires_grad_(False)
+    print("[mem] Non-language_model parameters frozen.")
 
     hooks, trainer_class, fisher, opt_params = setup_training_condition(model, args)
 

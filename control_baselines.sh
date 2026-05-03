@@ -24,7 +24,7 @@ STEP_FILE="results/.current_step_baselines"
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRANSFORMERS_VERBOSITY=error
-export TOKENIZERS_PARALLELISM=false
+export TOKENIZERS_PARALLELISM=true
 export PYTHONWARNINGS="ignore::UserWarning"
 export PYTORCH_TUNABLEOP_ENABLED=0
 export TORCH_BLAS_PREFER_HIPBLASLT=1
@@ -124,6 +124,7 @@ stop_status_renderer() {
     rm -f "$STATUS_FILE"
 }
 
+
 check_disk() {
     local avail_kb=$(df /scratch --output=avail 2>/dev/null | tail -1)
     local avail_gb=$(( avail_kb / 1024 / 1024 ))
@@ -135,6 +136,16 @@ check_disk() {
         exit 1
     fi
 }
+
+# ── Resumability helper ──
+checkpoint_done() {
+    local out_dir="$1" label="$2"
+    if [[ -d "$out_dir" ]] && grep -q "\"label\": \"$label\"" results/eval_log.jsonl 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 
 cleanup_gpu() {
     log "Killing stale Python processes..."
@@ -162,6 +173,7 @@ run_eval() {
     log "DONE  $CURRENT_STEP"
 }
 
+
 run_train_ewc() {
     local domain="$1" out_dir="$2" ewc_state_path="$3"
     shift 3
@@ -180,6 +192,7 @@ run_train_ewc() {
     stop_status_renderer
     log "DONE  $CURRENT_STEP"
 }
+
 
 run_train_replay() {
     local domain="$1" out_dir="$2" replay_buffer_path="$3"
@@ -271,19 +284,47 @@ EWC_MED="/scratch/checkpoints/ewc_seed1/medical"
 EWC_LEG="/scratch/checkpoints/ewc_seed1/legal"
 EWC_COD="/scratch/checkpoints/ewc_seed1/code"
 
-run_train_ewc medical "$EWC_MED" "none"
-run_eval "$EWC_MED" "ewc_seed1_after_medical"
 
-run_train_ewc legal "$EWC_LEG" "$EWC_MED/fisher.pt" --start_from "$EWC_MED"
-run_eval "$EWC_LEG" "ewc_seed1_after_legal"
 
-run_train_ewc code "$EWC_COD" "$EWC_LEG/fisher.pt" --start_from "$EWC_LEG"
-run_eval "$EWC_COD" "ewc_seed1_after_code"
+# --- Medical ---
+if checkpoint_done "$EWC_MED" "ewc_seed1_after_medical"; then
+    log "SKIP  Medical (already done)"
+else
+    
+    run_train_ewc medical "$EWC_MED" "none"
+    
+    run_eval "$EWC_MED" "ewc_seed1_after_medical"
+fi
+
+# --- Legal ---
+if checkpoint_done "$EWC_LEG" "ewc_seed1_after_legal"; then
+    log "SKIP  Legal (already done)"
+elif [[ -d "$EWC_LEG" ]]; then
+    log "Legal model exists but eval missing – 
+    running eval only"
+    
+    run_eval "$EWC_LEG" "ewc_seed1_after_legal"
+else
+    
+    run_train_ewc legal "$EWC_LEG" "$EWC_MED/fisher.pt" --start_from "$EWC_MED" 
+    
+    run_eval "$EWC_LEG" "ewc_seed1_after_legal"
+fi
+
+# --- Code ---
+if checkpoint_done "$EWC_COD" "ewc_seed1_after_code"; then
+    log "SKIP  Code (already done)"
+else
+    
+    run_train_ewc code "$EWC_COD" "$EWC_LEG/fisher.pt" --start_from "$EWC_LEG" 
+    
+    run_eval "$EWC_COD" "ewc_seed1_after_code"
+fi
 
 log "EWC done"
 notify "EWC done" "$(eval_summary)" "high" "white_check_mark"
 
-# ── Replay ──
+# ── Replay (cumulative buffer) ──
 log "=== Replay (seed 1) ==="
 REP_MED="/scratch/checkpoints/replay_seed1/medical"
 REP_LEG="/scratch/checkpoints/replay_seed1/legal"
@@ -291,19 +332,27 @@ REP_COD="/scratch/checkpoints/replay_seed1/code"
 REPLAY_DIR="/scratch/replay_buffers"
 mkdir -p "$REPLAY_DIR"
 
+# --- Medical (no prior buffer) ---
 MED_BUFFER="$REPLAY_DIR/medical_buffer.jsonl"
 build_replay_buffer medical "$MED_BUFFER" 5000
 
 run_train_replay medical "$REP_MED" "none"
 run_eval "$REP_MED" "replay_seed1_after_medical"
 
+# --- Legal (replay Medical) ---
 run_train_replay legal "$REP_LEG" "$MED_BUFFER" --start_from "$REP_MED"
 run_eval "$REP_LEG" "replay_seed1_after_legal"
 
+# --- Build cumulative buffer: Medical + Legal ---
 LEG_BUFFER="$REPLAY_DIR/legal_buffer.jsonl"
 build_replay_buffer legal "$LEG_BUFFER" 5000
 
-run_train_replay code "$REP_COD" "$LEG_BUFFER" --start_from "$REP_LEG"
+CUMULATIVE_BUFFER="$REPLAY_DIR/cumulative_med_legal.jsonl"
+cat "$MED_BUFFER" "$LEG_BUFFER" > "$CUMULATIVE_BUFFER"
+log "Cumulative replay buffer: $(wc -l < "$CUMULATIVE_BUFFER") samples (Medical + Legal)"
+
+# --- Code (replay Medical + Legal) ---
+run_train_replay code "$REP_COD" "$CUMULATIVE_BUFFER" --start_from "$REP_LEG"
 run_eval "$REP_COD" "replay_seed1_after_code"
 
 log "Replay done"
@@ -319,4 +368,4 @@ Elapsed: $(elapsed_str) | Spent: $(credit_used)
 
 $(eval_summary)" "high" "checkered_flag"
 
-log "Done."
+
